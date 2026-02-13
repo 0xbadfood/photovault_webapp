@@ -1,0 +1,2281 @@
+const state = {
+    user: null, // { userid: '...' }
+    view: localStorage.getItem('activeView') || 'dashboard', // 'dashboard' | 'files' | 'photos' | 'screenshots' | 'videos' | 'people' | 'search' | 'discover' | 'albums'
+    dashboardStats: null,
+
+
+    // File Explorer State
+    currentPath: '', // Relative path from user root
+    explorerItems: [], // Items in currentPath
+    fileViewMode: 'list', // 'list' | 'grid'
+    selectedFiles: new Set(), // Set of filenames
+    sortBy: localStorage.getItem('sortBy') || 'name', // 'name' | 'date' | 'size'
+    sortOrder: localStorage.getItem('sortOrder') || 'asc', // 'asc' | 'desc'
+    fileExplorerLimit: 100, // Pagination limit
+
+    // Photos View State
+    devices: [], // Aggregated scan result
+
+    // Timeline State (for Photos tab)
+    timelineGroups: [], // [{ date, count, photos }]
+
+    // People View State
+    people: [], // [{id, name, thumbnail}]
+
+    // Search View State
+    searchQuery: '',
+    searchPersonIds: [], // Selected person IDs for filter
+    searchResults: [], // [{id, thumbnail_url, image_url, description}]
+
+    // Albums State
+    albums: [], // [{id, name, description, album_type, photo_count, cover_url}]
+    currentAlbum: null, // { id, name, photos: [] }
+
+    // Discover State
+    memories: [], // [{type, title, description, photos}]
+
+    loading: false,
+    viewerImage: null, // { src: string } or null
+    savedScrollPosition: 0, // Saved scroll position for restoring after viewer close
+    videoVolume: 1.0,
+    zoomLevel: 100 // %
+};
+
+function updateZoom(val) {
+    state.zoomLevel = parseInt(val);
+    const zoomValEl = document.getElementById('zoomValue');
+    if (zoomValEl) zoomValEl.textContent = val + '%';
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) {
+        media.style.transform = `scale(${val / 100})`;
+    }
+}
+
+// --- API Calls ---
+
+async function login(userid, password) {
+    try {
+        const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid, password })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            state.user = { userid: data.userid };
+            state.view = 'dashboard'; // Force dashboard as landing page
+            render(); // Render immediately
+
+            // Initialize views in background
+            scanFiles();
+            fetchDashboardStats();
+            fetchExplorer('');
+            fetchPeople();
+        } else {
+            alert(data.error || 'Login failed');
+        }
+    } catch (e) {
+        alert('Internal Error');
+        console.error(e);
+    }
+}
+
+async function scanFiles() {
+    try {
+        const res = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid })
+        });
+        const data = await res.json();
+        if (data.devices) {
+            state.devices = data.devices;
+        }
+    } catch (e) {
+        console.error("Scan failed", e);
+    }
+}
+
+async function fetchExplorer(path) {
+    state.loading = true;
+    render();
+    try {
+        const url = `/api/files/list?userid=${encodeURIComponent(state.user.userid)}&path=${encodeURIComponent(path)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (res.ok) {
+            state.explorerItems = data.items;
+            state.currentPath = data.path; // server returns the resolved path
+            state.fileExplorerLimit = 100; // Reset pagination on new fetch
+        } else {
+            console.error("Fetch explorer failed", data.error);
+        }
+    } catch (e) {
+        console.error("Fetch error", e);
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
+async function fetchPeople() {
+    try {
+        const res = await fetch('/api/people');
+        const data = await res.json();
+        if (data.people) {
+            state.people = data.people;
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        if (state.view === 'people' || state.view === 'search') {
+            render();
+        }
+    }
+}
+
+async function updatePersonName(id, name) {
+    try {
+        await fetch('/api/people/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, name })
+        });
+        await fetchPeople();
+        render();
+    } catch (e) { console.error(e); }
+}
+
+async function deletePerson(id, name) {
+    if (!confirm(`Are you sure you want to delete ${name}?`)) return;
+    try {
+        const res = await fetch('/api/people/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+        if (res.ok) {
+            await fetchPeople();
+            render();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Delete failed');
+        }
+    } catch (e) {
+        alert('Delete error');
+        console.error(e);
+    }
+}
+
+// --- Sharing Functions ---
+
+function addShareOverlay(item, photo) {
+    if (photo.is_received) {
+        // Received photo: show "Shared" badge always + unshare btn on hover
+        const badge = document.createElement('div');
+        badge.className = 'shared-badge';
+        badge.innerHTML = `<i class="fa-solid fa-share-nodes"></i> Shared`;
+        item.appendChild(badge);
+
+        const unshareBtn = document.createElement('button');
+        unshareBtn.className = 'unshare-btn';
+        unshareBtn.title = 'Remove shared photo';
+        unshareBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        unshareBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (confirm('Remove this shared photo from your library?')) {
+                unsharePhoto(photo.id, photo.shared_by);
+            }
+        };
+        item.appendChild(unshareBtn);
+        // No share button for received photos
+    } else {
+        // Owned photo: show share button
+        const shareBtn = document.createElement('button');
+        shareBtn.className = 'share-btn';
+        shareBtn.title = 'Share';
+        shareBtn.innerHTML = '<i class="fa-solid fa-share-nodes"></i>';
+        shareBtn.onclick = (e) => {
+            e.stopPropagation();
+            openShareModal(photo.id, photo.shared_with || []);
+        };
+        item.appendChild(shareBtn);
+
+        // If already shared, show indicator
+        if (photo.shared_with && photo.shared_with.length > 0) {
+            const indicator = document.createElement('div');
+            indicator.className = 'shared-indicator';
+            indicator.innerHTML = `<i class="fa-solid fa-share-nodes"></i> ${photo.shared_with.length}`;
+            item.appendChild(indicator);
+        }
+    }
+}
+
+function openShareModal(photoId, alreadySharedWith) {
+    // Remove existing modal if any
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Share Photo</div>
+            <button class="modal-close"><i class="fa-solid fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="user-list" id="shareUserList">
+                <div style="text-align:center; color:var(--text-secondary); padding:10px;">Loading users...</div>
+            </div>
+            <button class="share-submit-btn" id="shareSubmitBtn" disabled>Share</button>
+        </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    modal.querySelector('.modal-close').onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    const selectedUsers = new Set();
+
+    // Load users
+    const loadUsers = async () => {
+        const listContainer = modal.querySelector('#shareUserList');
+        try {
+            const res = await fetch('/api/users/list');
+            const data = await res.json();
+            listContainer.innerHTML = '';
+
+            if (!data.users || data.users.length === 0) {
+                listContainer.innerHTML = `<div style="text-align:center; color:var(--text-secondary); padding:10px;">No other users found.</div>`;
+                return;
+            }
+
+            data.users.forEach(user => {
+                const isAlreadyShared = alreadySharedWith.includes(user.email);
+                const item = document.createElement('div');
+                item.className = 'user-list-item' + (isAlreadyShared ? ' already-shared' : '');
+
+                const initial = user.email.charAt(0).toUpperCase();
+
+                item.innerHTML = `
+                    <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
+                    <div class="user-email">${user.email}${isAlreadyShared ? ' <span style="color:#34c759;font-size:11px;">(already shared)</span>' : ''}</div>
+                    <div class="user-check"><i class="fa-solid fa-check"></i></div>
+                `;
+
+                if (!isAlreadyShared) {
+                    item.onclick = () => {
+                        if (selectedUsers.has(user.email)) {
+                            selectedUsers.delete(user.email);
+                            item.classList.remove('selected');
+                        } else {
+                            selectedUsers.add(user.email);
+                            item.classList.add('selected');
+                        }
+                        const btn = modal.querySelector('#shareSubmitBtn');
+                        btn.disabled = selectedUsers.size === 0;
+                        btn.textContent = selectedUsers.size > 0 ? `Share with ${selectedUsers.size} user${selectedUsers.size > 1 ? 's' : ''}` : 'Share';
+                    };
+                } else {
+                    item.style.opacity = '0.5';
+                    item.style.cursor = 'default';
+                }
+
+                listContainer.appendChild(item);
+            });
+        } catch (e) {
+            console.error(e);
+            listContainer.innerHTML = `<div style="color:#ff3b30; padding:10px;">Failed to load users.</div>`;
+        }
+    };
+
+    loadUsers();
+
+    // Submit handler
+    const submitBtn = modal.querySelector('#shareSubmitBtn');
+    submitBtn.onclick = async () => {
+        if (selectedUsers.size === 0) return;
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Sharing...';
+
+        try {
+            const res = await fetch('/api/share', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ photo_id: photoId, recipients: Array.from(selectedUsers) })
+            });
+            const data = await res.json();
+            if (data.success) {
+                close();
+                // Refresh current view
+                if (state.view === 'photos' || state.view === 'screenshots' || state.view === 'videos') {
+                    fetchTimeline();
+                }
+                render();
+            } else {
+                alert(data.error || 'Share failed');
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Share';
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Error sharing photo');
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Share';
+        }
+    };
+}
+
+async function unsharePhoto(photoId, ownerEmail) {
+    try {
+        const res = await fetch('/api/unshare/received', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ photo_id: photoId })
+        });
+        if (res.ok) {
+            // Refresh
+            if (state.view === 'photos' || state.view === 'screenshots' || state.view === 'videos') {
+                fetchTimeline();
+            }
+            render();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Unshare failed');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Error unsharing photo');
+    }
+}
+
+async function runSearch() {
+    state.loading = true;
+    render();
+    try {
+        const res = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                person_ids: state.searchPersonIds,
+                description: state.searchQuery
+            })
+        });
+        const data = await res.json();
+        if (data.results) {
+            state.searchResults = data.results;
+        }
+    } catch (e) { console.error(e); }
+    finally {
+        state.loading = false;
+        render();
+    }
+}
+
+async function fetchTimeline(type) {
+    state.loading = true;
+    render();
+    try {
+        let url = `/api/timeline?userid=${encodeURIComponent(state.user.userid)}`;
+        if (type) {
+            url += `&type=${encodeURIComponent(type)}`;
+        }
+        const res = await fetch(url);
+        const data = await res.json();
+        if (res.ok && data.groups) {
+            state.timelineGroups = data.groups;
+        }
+    } catch (e) {
+        console.error('Timeline fetch error', e);
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
+async function fetchAlbums(shouldRender = true) {
+    try {
+        const res = await fetch('/api/albums');
+        const data = await res.json();
+        if (data.albums) {
+            state.albums = data.albums;
+            if (shouldRender) render();
+        }
+    } catch (e) {
+        console.error('Albums fetch error', e);
+    } finally {
+        if (shouldRender) render();
+    }
+}
+
+async function fetchAlbumPhotos(albumId) {
+    state.loading = true;
+    render();
+    try {
+        const url = `/api/albums/${albumId}/photos?userid=${encodeURIComponent(state.user.userid)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (res.ok && data.photos) {
+            state.currentAlbum = {
+                id: albumId,
+                photos: data.photos
+            };
+        }
+    } catch (e) {
+        console.error('Album photos fetch error', e);
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
+async function fetchMemories() {
+    state.loading = true;
+    render();
+    try {
+        const url = `/api/discover/memories?userid=${encodeURIComponent(state.user.userid)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (res.ok && data.memories) {
+            state.memories = data.memories;
+        }
+    } catch (e) {
+        console.error('Memories fetch error', e);
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
+async function fetchDashboardStats() {
+    try {
+        const res = await fetch(`/api/dashboard/stats?userid=${encodeURIComponent(state.user.userid)}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (!data.error) {
+                state.dashboardStats = data;
+                render();
+            } else {
+                console.error('Dashboard stats error:', data.error);
+                state.dashboardStats = { error: data.error };
+                render();
+            }
+        } else {
+            state.dashboardStats = { error: `HTTP ${res.status}` };
+            render();
+        }
+    } catch (e) {
+        console.error('Dashboard stats fetch error', e);
+        state.dashboardStats = { error: 'Network Error' };
+        render();
+    }
+}
+
+function refreshViewData() {
+    if (!state.user) return;
+    const view = state.view;
+    if (view === 'photos') fetchTimeline('photo');
+    else if (view === 'screenshots') fetchTimeline('screenshot');
+    else if (view === 'videos') fetchTimeline('video');
+    else if (view === 'people' || view === 'search') fetchPeople();
+    else if (view === 'discover') fetchMemories();
+    else if (view === 'albums') fetchAlbums();
+    else if (view === 'files') fetchExplorer(state.currentPath || '');
+    else if (view === 'dashboard') fetchDashboardStats();
+}
+
+
+async function createAlbum(name, description = '', shouldRender = true) {
+    try {
+        const res = await fetch('/api/albums/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description, album_type: 'manual' })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            await fetchAlbums(shouldRender);
+            return data.album_id;
+        } else {
+            alert(data.error || 'Failed to create album');
+        }
+    } catch (e) {
+        console.error('Create album error', e);
+        alert('Error creating album');
+    }
+    return null;
+}
+
+async function deleteAlbum(albumId) {
+    if (!confirm('Delete this album? Photos will not be deleted.')) return;
+    try {
+        const res = await fetch(`/api/albums/${albumId}`, {
+            method: 'DELETE'
+        });
+        if (res.ok) {
+            await fetchAlbums();
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Failed to delete album');
+        }
+    } catch (e) {
+        console.error('Delete album error', e);
+        alert('Error deleting album');
+    }
+}
+
+async function renameItem(name, newName) {
+    // path arg for API is full relative path: currentPath + / + name
+    const fullPath = state.currentPath ? `${state.currentPath}/${name}` : name;
+
+    try {
+        const res = await fetch('/api/files/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid, path: fullPath, new_name: newName })
+        });
+        if (res.ok) {
+            await fetchExplorer(state.currentPath); // Refresh folder
+        } else {
+            const d = await res.json();
+            alert(d.error || 'Rename failed');
+        }
+    } catch (e) {
+        alert('Rename error');
+    }
+}
+
+async function deleteItem(name) {
+    if (!confirm(`Delete "${name}"?`)) return;
+    const fullPath = state.currentPath ? `${state.currentPath}/${name}` : name;
+
+    try {
+        const res = await fetch('/api/files/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid, path: fullPath })
+        });
+        if (res.ok) {
+            await fetchExplorer(state.currentPath);
+        } else {
+            const d = await res.json();
+            alert(d.error || 'Delete failed');
+        }
+    } catch (e) {
+        alert('Delete error');
+    }
+}
+
+async function batchDeleteFiles() {
+    if (state.selectedFiles.size === 0) return;
+    if (!confirm(`Delete ${state.selectedFiles.size} items?`)) return;
+
+    const paths = Array.from(state.selectedFiles).map(name =>
+        state.currentPath ? `${state.currentPath}/${name}` : name
+    );
+
+    try {
+        const res = await fetch('/api/files/batch-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid, paths })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            state.selectedFiles.clear();
+            await fetchExplorer(state.currentPath);
+            if (data.errors && data.errors.length > 0) {
+                alert(`Some items could not be deleted:\n${data.errors.join('\n')}`);
+            }
+        } else {
+            alert(data.error || 'Batch delete failed');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Batch delete error');
+    }
+}
+
+async function downloadSelectedFiles() {
+    if (state.selectedFiles.size === 0) return;
+    const paths = Array.from(state.selectedFiles).map(name =>
+        state.currentPath ? `${state.currentPath}/${name}` : name
+    );
+
+    try {
+        const res = await fetch('/api/files/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid, paths })
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'download.zip';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        } else {
+            const data = await res.json();
+            alert(data.error || 'Download failed');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Download error');
+    }
+}
+
+
+function openAddToAlbumModal(items) {
+    const photoIds = Array.isArray(items) ? items : [items];
+
+    // Remove existing modal if any
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+
+    // Header
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Add ${photoIds.length} Photo${photoIds.length > 1 ? 's' : ''} to Album</div>
+            <button class="modal-close"><i class="fa-solid fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="album-list" id="modalAlbumList">
+                <div style="text-align:center; color:var(--text-secondary); padding:10px;">Loading albums...</div>
+            </div>
+            <div class="create-album-section">
+                <div class="create-album-input-group">
+                    <input type="text" id="newAlbumName" placeholder="New Album Name">
+                    <button class="create-album-btn" id="createNewAlbumBtn">Create</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // Close handlers
+    const close = () => overlay.remove();
+    modal.querySelector('.modal-close').onclick = close;
+    overlay.onclick = (e) => {
+        if (e.target === overlay) close();
+    };
+
+    // Load albums
+    const loadAlbums = async () => {
+        const listContainer = modal.querySelector('#modalAlbumList');
+        // Ensure we have latest albums
+        await fetchAlbums(false); // Updates state.albums
+
+        listContainer.innerHTML = '';
+        if (state.albums.length === 0) {
+            listContainer.innerHTML = `<div style="text-align:center; color:var(--text-secondary); padding:10px;">No albums found.</div>`;
+        }
+
+        state.albums.forEach(album => {
+            const item = document.createElement('div');
+            item.className = 'album-list-item';
+
+            // Cover logic
+            let thumbHtml = '';
+            if (album.cover_url) {
+                thumbHtml = `<img src="${album.cover_url}" class="album-list-thumb">`;
+            } else {
+                thumbHtml = `<div class="album-list-thumb" style="display:flex;align-items:center;justify-content:center"><i class="fa-solid fa-images" style="font-size:16px;color:#888"></i></div>`;
+            }
+
+            item.innerHTML = `
+                ${thumbHtml}
+                <div class="album-list-info">
+                    <div class="album-list-name">${album.name}</div>
+                    <div class="album-list-count">${album.photo_count} photos</div>
+                </div>
+                <i class="fa-solid fa-plus-circle" style="color:var(--accent-color)"></i>
+            `;
+
+            item.onclick = async () => {
+                // Add to album
+                try {
+                    const res = await fetch(`/api/albums/${album.id}/add-photos`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ photo_ids: photoIds })
+                    });
+                    if (res.ok) {
+                        // success
+                        close();
+                        // Optional: show toast
+                        // alert(`Added to ${album.name}`);
+                        // Refresh if we are in album view?
+                        if (state.view === 'albums' && state.currentAlbum && state.currentAlbum.id === album.id) {
+                            fetchAlbumPhotos(album.id);
+                        }
+                    } else {
+                        alert('Failed to add photos');
+                    }
+                } catch (e) {
+                    console.error(e);
+                    alert('Error adding photos');
+                }
+            };
+            listContainer.appendChild(item);
+        });
+    };
+
+    loadAlbums();
+
+    // Create New Handler
+    const createBtn = modal.querySelector('#createNewAlbumBtn');
+    const nameInput = modal.querySelector('#newAlbumName');
+
+    const doCreate = async () => {
+        const name = nameInput.value.trim();
+        if (!name) return;
+
+        const albumId = await createAlbum(name, '', false); // Helper calls fetchAlbums internally
+        if (albumId) {
+            // Add photo to new album
+            try {
+                await fetch(`/api/albums/${albumId}/add-photos`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ photo_ids: photoIds })
+                });
+                close();
+                // alert(`Created ${name} and added photo`);
+            } catch (e) {
+                console.error(e);
+                alert('Created album but failed to add photos');
+            }
+        }
+    };
+
+    createBtn.onclick = doCreate;
+    nameInput.onkeypress = (e) => {
+        if (e.key === 'Enter') doCreate();
+    };
+}
+
+// --- Components ---
+
+function LoginScreen() {
+    const div = document.createElement('div');
+    div.className = 'login-container';
+    div.innerHTML = `
+        <div class="login-box">
+            <img src="/static/logo.png" style="width: 80px; margin-bottom: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+            <h1>Photos</h1>
+            <div class="input-group">
+                <input type="text" id="userid" placeholder="Apple ID (Email)" >
+            </div>
+            <div class="input-group">
+                <input type="password" id="password" placeholder="Password" value="passw0rd">
+            </div>
+            <button class="login-btn" id="loginBtn">Sign In</button>
+        </div>
+    `;
+
+    const triggerLogin = () => {
+        const u = div.querySelector('#userid').value;
+        const p = div.querySelector('#password').value;
+        if (u && p) login(u, p);
+    };
+
+    div.querySelector('#loginBtn').onclick = triggerLogin;
+    div.querySelector('#password').onkeypress = (e) => {
+        if (e.key === 'Enter') triggerLogin();
+    };
+
+    return div;
+}
+
+function Sidebar() {
+    const el = document.createElement('div');
+    el.className = 'sidebar';
+    el.innerHTML = `<div class="sidebar-title">Library</div>`;
+
+    const items = [
+        { id: 'dashboard', icon: 'fa-gauge-high', label: 'Dashboard' },
+        { id: 'files', icon: 'fa-folder', label: 'Files' },
+        { id: 'photos', icon: 'fa-images', label: 'Photos' },
+        { id: 'screenshots', icon: 'fa-mobile-screen', label: 'Screenshots' },
+        { id: 'videos', icon: 'fa-video', label: 'Videos' },
+        { id: 'albums', icon: 'fa-book', label: 'Albums' },
+        { id: 'people', icon: 'fa-users', label: 'People' },
+        { id: 'discover', icon: 'fa-sparkles', label: 'Discover' },
+        { id: 'search', icon: 'fa-search', label: 'Search' }
+    ];
+
+    items.forEach(item => {
+        const nav = document.createElement('div');
+        nav.className = `nav-item ${state.view === item.id ? 'active' : ''}`;
+        nav.innerHTML = `<i class="fa-solid ${item.icon}"></i> ${item.label}`;
+        nav.onclick = () => {
+            state.view = item.id;
+            localStorage.setItem('activeView', item.id);
+
+            if (item.id === 'albums') {
+                state.currentAlbum = null; // Reset album detail view
+            }
+
+            refreshViewData();
+            render();
+        };
+        el.appendChild(nav);
+    });
+
+    // Logout Button
+    const logoutBtn = document.createElement('div');
+    logoutBtn.className = 'nav-item logout-btn'; // Add a class for specific styling
+    logoutBtn.innerHTML = `<i class="fa-solid fa-sign-out-alt"></i> Logout`;
+    logoutBtn.onclick = logout;
+
+    // Add spacer or style to push to bottom if flex container
+    // Assuming sidebar is flex column, we can use margin-top: auto on this button
+    logoutBtn.style.marginTop = 'auto'; // Push to bottom
+    el.appendChild(logoutBtn);
+
+    return el;
+}
+
+async function logout() {
+    if (!confirm('Are you sure you want to log out?')) return;
+    try {
+        await fetch('/api/logout', { method: 'POST' });
+        window.location.reload(); // Reload to clear state and show login
+    } catch (e) {
+        console.error(e);
+        window.location.reload();
+    }
+}
+
+function PeopleGallery() {
+    const grid = document.createElement('div');
+    grid.className = 'people-grid';
+
+    if (state.people.length === 0) {
+        grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No people identified yet. Add photos first!</div>`;
+        return grid;
+    }
+
+    state.people.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'person-item';
+
+        const thumbUrl = p.thumbnail ? `/resource/thumbnail/${state.user.userid}/${p.thumbnail.split('/').pop()}?v=${Date.now()}` : '/static/logo.png';
+        // Need to parse filename from path if it's stored as full path in DB or handle serving
+        // In DB we store "thumbnail_path". If it's absolute, we need just basename for our serving route if using standard route, or fix serving route.
+        // Server route: /resource/thumbnail/<userid>/<filename>
+        // DB stores full path typically or rel path? In daemon we stored full path.
+        // Let's assume we serve by basename for simplicity or refactor server to take full path?
+        // Server takes <filename> inside thumb dir. So we need just the basename.
+
+        const namePart = p.thumbnail ? (p.thumbnail.split('/').pop()) : 'default.jpg';
+        const finalUrl = p.thumbnail ? `/resource/thumbnail/${state.user.userid}/${namePart}` : '';
+
+        item.innerHTML = `
+            <div class="person-avatar">
+                ${finalUrl ? `<img src="${finalUrl}">` : '<i class="fa-solid fa-user"></i>'}
+            </div>
+            <button class="person-delete-btn" title="Delete Person"><i class="fa-solid fa-trash"></i></button>
+            <div class="person-name" contenteditable="true">${p.name}</div>
+        `;
+
+        // Delete Handler
+        const delBtn = item.querySelector('.person-delete-btn');
+        if (delBtn) {
+            delBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                deletePerson(p.id, p.name);
+            };
+        }
+
+        // Editable Name
+        const nameEl = item.querySelector('.person-name');
+        nameEl.onblur = () => {
+            const newName = nameEl.innerText.trim();
+            if (newName !== p.name) {
+                updatePersonName(p.id, newName);
+            }
+        };
+        nameEl.onkeypress = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                nameEl.blur();
+            }
+        };
+
+        grid.appendChild(item);
+    });
+
+    return grid;
+}
+
+function SearchInterface() {
+    const container = document.createElement('div');
+    container.className = 'search-interface';
+
+    // 1. Controls
+    const controls = document.createElement('div');
+    controls.className = 'search-controls';
+
+    // People Select
+    const peopleSelect = document.createElement('div');
+    peopleSelect.className = 'search-people-select';
+    peopleSelect.innerHTML = `<h4>With People:</h4>`;
+    const peopleList = document.createElement('div');
+    peopleList.className = 'people-chips';
+
+    state.people.forEach(p => {
+        const chip = document.createElement('div');
+        chip.className = `person-chip ${state.searchPersonIds.includes(p.id) ? 'selected' : ''}`;
+        chip.innerText = p.name;
+        chip.onclick = () => {
+            if (state.searchPersonIds.includes(p.id)) {
+                state.searchPersonIds = state.searchPersonIds.filter(id => id !== p.id);
+            } else {
+                state.searchPersonIds.push(p.id);
+            }
+            render(); // Re-render to update selection style
+        };
+        peopleList.appendChild(chip);
+    });
+    peopleSelect.appendChild(peopleList);
+    controls.appendChild(peopleSelect);
+
+    // Text Search
+    const searchBox = document.createElement('div');
+    searchBox.className = 'search-box-row';
+    searchBox.innerHTML = `
+        <input type="text" id="searchInput" placeholder="Search by description..." value="${state.searchQuery}">
+        <button id="doSearchBtn">Search</button>
+    `;
+    controls.appendChild(searchBox);
+
+    container.appendChild(controls);
+
+    // Bind Search Action
+    setTimeout(() => {
+        const btn = container.querySelector('#doSearchBtn');
+        const inp = container.querySelector('#searchInput');
+        if (btn && inp) {
+            btn.onclick = () => {
+                state.searchQuery = inp.value;
+                runSearch();
+            };
+            inp.onkeypress = (e) => {
+                if (e.key === 'Enter') {
+                    state.searchQuery = inp.value;
+                    runSearch();
+                }
+            };
+        }
+    }, 0);
+
+    // 2. Results
+    const resultsGrid = document.createElement('div');
+    resultsGrid.className = 'photo-grid';
+    if (state.searchResults.length > 0) {
+        state.searchResults.forEach(r => {
+            const item = document.createElement('div');
+            item.className = 'photo-item';
+
+            // Add Album Button
+            const albumBtn = document.createElement('button');
+            albumBtn.className = 'album-btn';
+            albumBtn.title = 'Add to Album';
+            albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+            albumBtn.onclick = (e) => {
+                e.stopPropagation();
+                openAddToAlbumModal(r.id);
+            };
+            item.appendChild(albumBtn);
+            addShareOverlay(item, r);
+
+            const img = document.createElement('img');
+            img.src = r.thumbnail_url;
+            img.loading = "lazy";
+            img.onload = () => img.classList.add('loaded');
+            item.appendChild(img);
+
+            item.onclick = () => {
+                state.viewerImage = { src: r.image_url, type: r.type };
+                render();
+            };
+
+            resultsGrid.appendChild(item);
+        });
+    } else if (state.searchQuery || state.searchPersonIds.length > 0) {
+        resultsGrid.innerHTML = `<div style="padding:20px;">No results found.</div>`;
+    }
+
+    container.appendChild(resultsGrid);
+    return container;
+}
+
+function FileExplorer() {
+    const container = document.createElement('div');
+    container.className = 'file-explorer';
+
+    // 1. Header with Breadcrumbs / Actions
+    const header = document.createElement('div');
+    header.className = 'fe-header';
+
+    // Breadcrumbs
+    const parts = state.currentPath.split('/').filter(p => p);
+
+    const breadcrumbs = document.createElement('div');
+    breadcrumbs.className = 'fe-breadcrumbs';
+
+    if (parts.length > 0) {
+        const backBtn = document.createElement('button');
+        backBtn.className = 'fe-back-btn';
+        backBtn.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+        backBtn.onclick = () => {
+            parts.pop();
+            fetchExplorer(parts.join('/'));
+        };
+        breadcrumbs.appendChild(backBtn);
+    }
+
+    const title = document.createElement('span');
+    title.className = 'fe-title';
+    title.innerText = parts.length > 0 ? parts[parts.length - 1] : 'Home';
+    breadcrumbs.appendChild(title);
+    header.appendChild(breadcrumbs);
+
+    // Toolbar (View Toggle + Selection)
+    const toolbar = document.createElement('div');
+    toolbar.className = 'fe-toolbar';
+
+    if (state.selectedFiles.size > 0) {
+        const downloadBtn = document.createElement('button');
+        downloadBtn.className = 'fe-tool-btn';
+        downloadBtn.innerHTML = `<i class="fa-solid fa-download"></i> Download (${state.selectedFiles.size})`;
+        downloadBtn.onclick = downloadSelectedFiles;
+        toolbar.appendChild(downloadBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'fe-tool-btn danger';
+        delBtn.innerHTML = `<i class="fa-solid fa-trash"></i> Delete (${state.selectedFiles.size})`;
+        delBtn.onclick = batchDeleteFiles;
+        toolbar.appendChild(delBtn);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'fe-tool-btn';
+        clearBtn.innerText = 'Clear';
+        clearBtn.onclick = () => {
+            state.selectedFiles.clear();
+            render();
+        };
+        toolbar.appendChild(clearBtn);
+    }
+    // View Toggle
+    const viewToggle = document.createElement('button');
+    viewToggle.className = 'fe-tool-btn';
+    viewToggle.innerHTML = state.fileViewMode === 'list'
+        ? '<i class="fa-solid fa-grip"></i> Grid'
+        : '<i class="fa-solid fa-list"></i> List';
+    viewToggle.onclick = () => {
+        state.fileViewMode = state.fileViewMode === 'list' ? 'grid' : 'list';
+        render();
+    };
+    toolbar.appendChild(viewToggle);
+
+    // Sort Dropdown
+    const sortSelect = document.createElement('select');
+    sortSelect.className = 'fe-sort-select';
+    sortSelect.innerHTML = `
+        <option value="name-asc" ${state.sortBy === 'name' && state.sortOrder === 'asc' ? 'selected' : ''}>Name (A-Z)</option>
+        <option value="name-desc" ${state.sortBy === 'name' && state.sortOrder === 'desc' ? 'selected' : ''}>Name (Z-A)</option>
+        <option value="date-desc" ${state.sortBy === 'date' && state.sortOrder === 'desc' ? 'selected' : ''}>Date (Newest)</option>
+        <option value="date-asc" ${state.sortBy === 'date' && state.sortOrder === 'asc' ? 'selected' : ''}>Date (Oldest)</option>
+        <option value="size-desc" ${state.sortBy === 'size' && state.sortOrder === 'desc' ? 'selected' : ''}>Size (Largest)</option>
+        <option value="size-asc" ${state.sortBy === 'size' && state.sortOrder === 'asc' ? 'selected' : ''}>Size (Smallest)</option>
+    `;
+    sortSelect.onchange = (e) => {
+        const [sortBy, sortOrder] = e.target.value.split('-');
+        state.sortBy = sortBy;
+        state.sortOrder = sortOrder;
+        localStorage.setItem('sortBy', sortBy);
+        localStorage.setItem('sortOrder', sortOrder);
+        render();
+    };
+    toolbar.appendChild(sortSelect);
+
+    header.appendChild(toolbar);
+    container.appendChild(header);
+
+    // 2. Items List/Grid
+    if (state.explorerItems.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'fe-empty';
+        empty.innerText = 'This folder is empty';
+        container.appendChild(empty);
+        return container;
+    }
+
+    // Sort items
+    const sortedItems = [...state.explorerItems];
+
+    // Separate directories and files
+    const directories = sortedItems.filter(item => item.type === 'dir');
+    const files = sortedItems.filter(item => item.type !== 'dir');
+
+    // Sort function
+    const sortItems = (items) => {
+        return items.sort((a, b) => {
+            let comparison = 0;
+
+            if (state.sortBy === 'name') {
+                const nameA = a.name || '';
+                const nameB = b.name || '';
+                comparison = nameA.localeCompare(nameB);
+            } else if (state.sortBy === 'date') {
+                const modA = (a.modified !== undefined && a.modified !== null) ? a.modified : 0;
+                const modB = (b.modified !== undefined && b.modified !== null) ? b.modified : 0;
+                comparison = modA - modB;
+            } else if (state.sortBy === 'size') {
+                const sizeA = (a.size !== undefined && a.size !== null) ? a.size : 0;
+                const sizeB = (b.size !== undefined && b.size !== null) ? b.size : 0;
+                comparison = sizeA - sizeB;
+            }
+
+            return state.sortOrder === 'asc' ? comparison : -comparison;
+        });
+    };
+
+    // Sort directories and files separately
+    sortItems(directories);
+    sortItems(files);
+
+    // Combine: directories first, then files
+    const finalItems = [...directories, ...files];
+    const paginatedItems = finalItems.slice(0, state.fileExplorerLimit);
+
+    const itemsContainer = document.createElement('div');
+    itemsContainer.className = state.fileViewMode === 'list' ? 'fe-list' : 'fe-grid';
+
+    paginatedItems.forEach(item => {
+        const isDir = item.type === 'dir';
+        // Determine icon/thumb
+        // For grid, if it's an image, try to show thumb? 
+        // We can reuse Photo logic for thumbs if it's an image file
+        const isImage = !isDir && (item.name.toLowerCase().endsWith('.jpg') || item.name.toLowerCase().endsWith('.png') || item.name.toLowerCase().endsWith('.jpeg'));
+
+        const el = document.createElement('div');
+        el.className = state.fileViewMode === 'list' ? 'fe-row' : 'fe-card';
+        if (state.selectedFiles.has(item.name)) el.classList.add('selected');
+
+        // Selection Checkbox Logic
+        const toggleSelection = (e) => {
+            e.stopPropagation();
+            if (state.selectedFiles.has(item.name)) state.selectedFiles.delete(item.name);
+            else state.selectedFiles.add(item.name);
+            render();
+        };
+
+        // Content Generation
+        if (state.fileViewMode === 'list') {
+            const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+            const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+
+            el.innerHTML = `
+                    <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                    <div class="fe-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}"></i></div>
+                    <div class="fe-name">${item.name}</div>
+                    <div class="fe-size">${isDir ? '' : formatSize(item.size)}</div>
+                `;
+            el.querySelector('.fe-checkbox').onclick = toggleSelection;
+
+        } else {
+            // GRID VIEW
+            const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+            const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+
+            let contentHTML = '';
+
+            if (!isDir && (isImage || item.name.toLowerCase().endsWith('.mp4') || item.name.toLowerCase().endsWith('.mov') || item.name.toLowerCase().endsWith('.avi'))) {
+                const fullRelPath = state.currentPath ? `${state.currentPath}/${item.name}` : item.name;
+                const parts = fullRelPath.split('/');
+
+                if (parts.length >= 2 && parts[1] === 'files') {
+                    const device = parts[0];
+                    if (parts.length > 2) {
+                        const relPath = parts.slice(2).join('/');
+                        const safeRelPath = relPath.replace(/\//g, '_').replace(/\\/g, '_');
+                        let thumbName = `${device}__${safeRelPath}`;
+
+                        if (!thumbName.toLowerCase().endsWith('.jpg')) {
+                            thumbName += '.jpg';
+                        }
+                        if (safeRelPath.toLowerCase().endsWith('.jpg') || safeRelPath.toLowerCase().endsWith('.jpeg')) {
+                            thumbName = `${device}__${safeRelPath}`;
+                            if (safeRelPath.toLowerCase().endsWith('.jpeg')) thumbName += '.jpg';
+                        } else {
+                            thumbName = `${device}__${safeRelPath}.jpg`;
+                        }
+
+                        const thumbSrc = `/resource/thumbnail/${state.user.userid}/${thumbName}`;
+                        contentHTML = `<img src="${thumbSrc}" loading="lazy" onload="this.classList.add('loaded')" class="grid-thumb" style="width:100%; height:100%; object-fit: cover; border-radius: 6px;">`;
+
+                        if (!isImage) {
+                            contentHTML += '<div class="play-icon-overlay" style="width:30px;height:30px;font-size:16px;"><i class="fa-solid fa-play"></i></div>';
+                        }
+                    }
+                }
+            }
+
+            if (!contentHTML) {
+                const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+                const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+                contentHTML = `<div class="grid-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}; font-size: 48px;"></i></div>`;
+            }
+
+            el.innerHTML = `
+                <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                ${contentHTML}
+                <div class="grid-name">${item.name}</div>
+            `;
+
+            const checkbox = el.querySelector('.fe-checkbox');
+            checkbox.onclick = toggleSelection;
+        }
+
+        // Content Generation
+        if (state.fileViewMode === 'list') {
+            const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+            const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+
+            el.innerHTML = `
+                    <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                    <div class="fe-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}"></i></div>
+                    <div class="fe-name">${item.name}</div>
+                    <div class="fe-size">${isDir ? '' : formatSize(item.size)}</div>
+                `;
+            el.querySelector('.fe-checkbox').onclick = toggleSelection;
+
+        } else {
+            // GRID VIEW
+            const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+            const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+
+            let contentHTML = '';
+
+            if (!isDir && (isImage || item.name.toLowerCase().endsWith('.mp4') || item.name.toLowerCase().endsWith('.mov') || item.name.toLowerCase().endsWith('.avi'))) {
+                const fullRelPath = state.currentPath ? `${state.currentPath}/${item.name}` : item.name;
+                const parts = fullRelPath.split('/');
+
+                if (parts.length >= 2 && parts[1] === 'files') {
+                    const device = parts[0];
+                    if (parts.length > 2) {
+                        const relPath = parts.slice(2).join('/');
+                        const safeRelPath = relPath.replace(/\//g, '_').replace(/\\/g, '_');
+                        let thumbName = `${device}__${safeRelPath}`;
+
+                        if (!thumbName.toLowerCase().endsWith('.jpg')) {
+                            thumbName += '.jpg';
+                        }
+                        if (safeRelPath.toLowerCase().endsWith('.jpg') || safeRelPath.toLowerCase().endsWith('.jpeg')) {
+                            thumbName = `${device}__${safeRelPath}`;
+                            if (safeRelPath.toLowerCase().endsWith('.jpeg')) thumbName += '.jpg';
+                        } else {
+                            thumbName = `${device}__${safeRelPath}.jpg`;
+                        }
+
+                        const thumbSrc = `/resource/thumbnail/${state.user.userid}/${thumbName}`;
+                        contentHTML = `<img src="${thumbSrc}" loading="lazy" onload="this.classList.add('loaded')" class="grid-thumb" style="width:100%; height:100%; object-fit: cover; border-radius: 6px;">`;
+
+                        if (!isImage) {
+                            contentHTML += '<div class="play-icon-overlay" style="width:30px;height:30px;font-size:16px;"><i class="fa-solid fa-play"></i></div>';
+                        }
+                    }
+                }
+            }
+
+            if (!contentHTML) {
+                const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
+                const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
+                contentHTML = `<div class="grid-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}; font-size: 48px;"></i></div>`;
+            }
+
+            el.innerHTML = `
+                <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                ${contentHTML}
+                <div class="grid-name">${item.name}</div>
+            `;
+
+            const checkbox = el.querySelector('.fe-checkbox');
+            checkbox.onclick = toggleSelection;
+        }
+
+        // Click Handler: Navigation or Preview
+        el.onclick = (e) => {
+            if (e.target.closest('.fe-checkbox')) return;
+
+            // Multi-select with Ctrl not implemented, assuming checkbox use
+
+            if (isDir) {
+                const newPath = state.currentPath ? `${state.currentPath}/${item.name}` : item.name;
+                state.selectedFiles.clear(); // Clear selection on nav
+                fetchExplorer(newPath);
+            } else {
+                const parsed = parseImagePath(state.currentPath, item.name);
+                if (parsed) {
+                    // Save scroll position
+                    const contentArea = document.querySelector('.content-area');
+                    if (contentArea) state.savedScrollPosition = contentArea.scrollTop;
+
+                    // Detect if video
+                    const isVideo = item.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+                    state.viewerImage = {
+                        src: parsed.url,
+                        type: isVideo ? 'video' : 'image',
+                        path: parsed.path
+                    };
+                    render();
+                }
+            }
+        };
+
+        itemsContainer.appendChild(el);
+    });
+
+    container.appendChild(itemsContainer);
+
+    // Load More Button
+    if (finalItems.length > state.fileExplorerLimit) {
+        const loadMoreDiv = document.createElement('div');
+        loadMoreDiv.style.textAlign = 'center';
+        loadMoreDiv.style.padding = '20px';
+
+        const loadBtn = document.createElement('button');
+        loadBtn.className = 'btn';
+        loadBtn.innerText = `Load More (${finalItems.length - state.fileExplorerLimit} remaining)`;
+        loadBtn.onclick = () => {
+            const contentArea = document.querySelector('.content-area');
+            if (contentArea) {
+                state.savedScrollPosition = contentArea.scrollTop;
+            }
+            state.fileExplorerLimit += 100;
+            render();
+        };
+
+        loadMoreDiv.appendChild(loadBtn);
+        container.appendChild(loadMoreDiv);
+    }
+
+    return container;
+}
+
+function formatSize(bytes) {
+    if (bytes === undefined || bytes === null || isNaN(bytes)) return '0 B';
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k));
+    if (i < 0) return '0 B';
+    if (i >= sizes.length) return '> 1 PB';
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Helper to determine if a file explorer path matches the server's image serving structure
+function parseImagePath(dirPath, filename) {
+    // Server serves: /resource/image/<userid>/<device>/<filename>
+    // Where valid internal path is: user_dir/<device>/files/<filename>
+
+    // Check if dirPath starts with "something/files"
+    const parts = dirPath.split('/');
+    if (parts.length >= 2 && parts[1] === 'files') {
+        const device = parts[0];
+        // The "filename" arg in server route is <path:filename>, so it includes subdirs if any
+        // If dirPath is "myiphone/files/subdir", rest is "subdir"
+        const relativeSubdir = parts.slice(2).join('/');
+        const finalPath = relativeSubdir ? `${relativeSubdir}/${filename}` : filename;
+
+        // original URL for img src
+        const url = `/resource/image/${state.user.userid}/${device}/${finalPath}`;
+
+        // Construct Real Path relative to user root for metadata API
+        // This must match database path structure: <device>/files/<subdir>/<filename>
+        const realPath = `${device}/files/${finalPath}`;
+
+        return {
+            url: url,
+            path: realPath
+        };
+    }
+    return null; // Not viewable via the standard image route
+}
+
+// --- Timeline View (for Photos tab) ---
+
+function TimelineView() {
+    const container = document.createElement('div');
+    container.className = 'timeline-view';
+
+    if (state.timelineGroups.length === 0) {
+        container.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos found.</div>`;
+        return container;
+    }
+
+    state.timelineGroups.forEach(group => {
+        const section = document.createElement('div');
+        section.className = 'timeline-section';
+
+        // Date header
+        const header = document.createElement('div');
+        header.className = 'timeline-date-header';
+
+        let formattedDate = 'Unknown Date';
+        if (group.date !== 'Unknown') {
+            const dateObj = new Date(group.date);
+            formattedDate = dateObj.toLocaleDateString('en-US', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+        }
+
+        header.innerHTML = `
+            <div>
+                <h3>${formattedDate}</h3>
+                <span>${group.count} photos</span>
+            </div>
+            <button class="header-action-btn" title="Add all to Album">
+                <i class="fa-solid fa-plus-square"></i>
+            </button>
+        `;
+
+        // Bind header action
+        const actionBtn = header.querySelector('.header-action-btn');
+        actionBtn.onclick = (e) => {
+            e.stopPropagation();
+            const allIds = group.photos.map(p => p.id);
+            openAddToAlbumModal(allIds);
+        };
+
+        section.appendChild(header);
+
+        // Photo grid for this date
+        const grid = document.createElement('div');
+        grid.className = 'timeline-grid';
+
+        group.photos.forEach(photo => {
+            const item = document.createElement('div');
+            item.className = 'photo-item';
+
+            // Add Album Button
+            const albumBtn = document.createElement('button');
+            albumBtn.className = 'album-btn';
+            albumBtn.title = 'Add to Album';
+            albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+            albumBtn.onclick = (e) => {
+                e.stopPropagation();
+                openAddToAlbumModal(photo.id);
+            };
+            item.appendChild(albumBtn);
+            addShareOverlay(item, photo);
+
+            if (photo.type === 'video') {
+                const playIcon = document.createElement('div');
+                playIcon.className = 'play-icon-overlay';
+                playIcon.innerHTML = '<i class="fa-solid fa-play"></i>';
+                item.appendChild(playIcon);
+            }
+
+            const img = document.createElement('img');
+            img.src = photo.thumbnail_url;
+            img.loading = "lazy";
+            img.onload = () => img.classList.add('loaded');
+            item.appendChild(img);
+
+            item.onclick = () => {
+                // Save scroll position before opening viewer
+                const contentArea = document.querySelector('.content-area');
+                if (contentArea) {
+                    state.savedScrollPosition = contentArea.scrollTop;
+                }
+                state.viewerImage = { src: photo.image_url, type: photo.type };
+                render();
+            };
+
+            grid.appendChild(item);
+        });
+
+        section.appendChild(grid);
+        container.appendChild(section);
+    });
+
+    return container;
+}
+
+// --- Discover View ---
+
+function DiscoverView() {
+    const container = document.createElement('div');
+    container.className = 'discover-view';
+
+    if (state.memories.length === 0) {
+        container.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No memories found. Check back when you have photos from past years!</div>`;
+        return container;
+    }
+
+    state.memories.forEach(memory => {
+        const card = document.createElement('div');
+        card.className = 'memory-card';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'memory-header';
+        header.innerHTML = `
+            <h2>${memory.title}</h2>
+            <p>${memory.description}</p>
+        `;
+        card.appendChild(header);
+
+        // Photo preview grid
+        const preview = document.createElement('div');
+        preview.className = 'memory-preview';
+
+        // Show up to 6 photos in preview
+        const previewPhotos = memory.photos.slice(0, 6);
+        previewPhotos.forEach(photo => {
+            const item = document.createElement('div');
+            item.className = 'photo-item';
+
+            // Add Album Button
+            const albumBtn = document.createElement('button');
+            albumBtn.className = 'album-btn';
+            albumBtn.title = 'Add to Album';
+            albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+            albumBtn.onclick = (e) => {
+                e.stopPropagation();
+                openAddToAlbumModal(photo.id);
+            };
+            item.appendChild(albumBtn);
+            addShareOverlay(item, photo);
+
+            const img = document.createElement('img');
+            img.src = photo.thumbnail_url;
+            img.loading = "lazy";
+            img.onload = () => img.classList.add('loaded');
+            item.appendChild(img);
+
+            item.onclick = () => {
+                state.viewerImage = { src: photo.image_url, type: photo.type };
+                render();
+            };
+
+            preview.appendChild(item);
+        });
+
+        card.appendChild(preview);
+        container.appendChild(card);
+    });
+
+    return container;
+}
+
+// --- Albums View ---
+
+function AlbumsView() {
+    const container = document.createElement('div');
+    container.className = 'albums-view';
+
+    // If viewing specific album, show album detail
+    if (state.currentAlbum) {
+        return AlbumDetailView();
+    }
+
+    // Header with create button
+    const header = document.createElement('div');
+    header.className = 'albums-header';
+    header.innerHTML = `
+        <h2>Albums</h2>
+        <button class="create-album-btn" id="createAlbumBtn">
+            <i class="fa-solid fa-plus"></i> Create Album
+        </button>
+    `;
+    container.appendChild(header);
+
+    setTimeout(() => {
+        const btn = document.getElementById('createAlbumBtn');
+        if (btn) {
+            btn.onclick = async () => {
+                const name = prompt('Album name:');
+                if (name) {
+                    await createAlbum(name);
+                }
+            };
+        }
+    }, 0);
+
+    // Albums grid
+    const grid = document.createElement('div');
+    grid.className = 'albums-grid';
+
+    if (state.albums.length === 0) {
+        grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No albums yet. Create one to get started!</div>`;
+    } else {
+        state.albums.forEach(album => {
+            const card = document.createElement('div');
+            card.className = 'album-card';
+
+            // Cover photo
+            const cover = document.createElement('div');
+            cover.className = 'album-cover';
+            if (album.cover_url) {
+                cover.style.backgroundImage = `url(${album.cover_url})`;
+            } else {
+                cover.innerHTML = `<i class="fa-solid fa-images"></i>`;
+            }
+            card.appendChild(cover);
+
+            // Album info
+            const info = document.createElement('div');
+            info.className = 'album-info';
+            info.innerHTML = `
+                <h3>${album.name}</h3>
+                <p>${album.photo_count} photos</p>
+            `;
+            if (album.album_type === 'auto_date') {
+                const badge = document.createElement('span');
+                badge.className = 'album-badge';
+                badge.textContent = 'Auto';
+                info.appendChild(badge);
+            }
+            card.appendChild(info);
+
+            // Delete button
+            const delBtn = document.createElement('button');
+            delBtn.className = 'album-delete-btn';
+            delBtn.innerHTML = `<i class="fa-solid fa-trash"></i>`;
+            delBtn.onclick = (e) => {
+                e.stopPropagation();
+                deleteAlbum(album.id);
+            };
+            card.appendChild(delBtn);
+
+            // Click to view album
+            card.onclick = () => {
+                fetchAlbumPhotos(album.id);
+            };
+
+            grid.appendChild(card);
+        });
+    }
+
+    container.appendChild(grid);
+    return container;
+}
+
+function AlbumDetailView() {
+    const container = document.createElement('div');
+    container.className = 'album-detail-view';
+
+    // Back button and header
+    const header = document.createElement('div');
+    header.className = 'album-detail-header';
+    header.innerHTML = `
+        <button class="back-btn" id="backToAlbumsBtn">
+            <i class="fa-solid fa-arrow-left"></i> Back to Albums
+        </button>
+        <h2>Album Photos</h2>
+    `;
+    container.appendChild(header);
+
+    setTimeout(() => {
+        const btn = document.getElementById('backToAlbumsBtn');
+        if (btn) {
+            btn.onclick = () => {
+                state.currentAlbum = null;
+                render();
+            };
+        }
+    }, 0);
+
+    // Photo grid
+    const grid = document.createElement('div');
+    grid.className = 'photo-grid';
+
+    if (!state.currentAlbum.photos || state.currentAlbum.photos.length === 0) {
+        grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos in this album.</div>`;
+    } else {
+        state.currentAlbum.photos.forEach(photo => {
+            const item = document.createElement('div');
+            item.className = 'photo-item';
+
+            // Add Album Button
+            const albumBtn = document.createElement('button');
+            albumBtn.className = 'album-btn';
+            albumBtn.title = 'Add to Album';
+            albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+            albumBtn.onclick = (e) => {
+                e.stopPropagation();
+                openAddToAlbumModal(photo.id); /**/
+            };
+            item.appendChild(albumBtn);
+            addShareOverlay(item, photo);
+
+            if (photo.type === 'video') {
+                const playIcon = document.createElement('div');
+                playIcon.className = 'play-icon-overlay';
+                playIcon.innerHTML = '<i class="fa-solid fa-play"></i>';
+                item.appendChild(playIcon);
+            }
+
+            const img = document.createElement('img');
+            img.src = photo.thumbnail_url;
+            img.loading = "lazy";
+            img.onload = () => img.classList.add('loaded');
+            item.appendChild(img);
+
+            item.onclick = () => {
+                // Save scroll position
+                const contentArea = document.querySelector('.content-area');
+                if (contentArea) state.savedScrollPosition = contentArea.scrollTop;
+
+                state.viewerImage = { src: photo.image_url, type: photo.type };
+                render();
+            };
+
+            grid.appendChild(item);
+        });
+    }
+
+    container.appendChild(grid);
+    return container;
+}
+
+function PhotoGallery() {
+    const grid = document.createElement('div');
+    grid.className = 'photo-grid';
+
+    // Aggregate files from all devices
+    let allFiles = [];
+    state.devices.forEach(d => {
+        if (d.files) {
+            allFiles = allFiles.concat(d.files.map(f => ({ ...f, device: d.name })));
+        }
+    });
+
+    if (allFiles.length === 0) {
+        grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos found.</div>`;
+        return grid;
+    }
+
+    allFiles.forEach(f => {
+        const item = document.createElement('div');
+        item.className = 'photo-item';
+
+        // Thumb extraction (Assumes specific flat format from server)
+        // Thumb extraction (Assumes specific flat format from server)
+        const safeRelPath = f.rel_path.replace(/\//g, '_').replace(/\\/g, '_');
+
+        let thumbName = `${f.device}__${safeRelPath}`;
+        if (!thumbName.toLowerCase().endsWith('.jpg')) {
+            thumbName += '.jpg';
+        }
+        // If it already ends in .jpg (or .jpeg etc but daemon normalizes to .jpg if single ext check?), 
+        // Daemon logic: if ends with .jpg, keeps it. if ends with .png, adds .jpg?
+        // Daemon: if safe_base.lower().endswith('.jpg'): safe_name = ... else: safe_name = ... + .jpg
+        // So daemon ALWAYS ensures it ends in .jpg.
+        // But if original was .png, daemon makes it .png.jpg
+        // If original was .jpg, daemon makes it .jpg (NOT .jpg.jpg)
+
+        // So in JS:
+        // if f.rel_path ends in .jpg, safeRelPath ends in .jpg.
+        // We want NO extra .jpg.
+        // If f.rel_path ends in .png, safeRelPath ends in .png.
+        // Daemon makes it .png.jpg.
+
+        // So logic:
+        // If ends in .jpg, leave it.
+        // If not, append .jpg.
+
+        if (safeRelPath.toLowerCase().endsWith('.jpg') || safeRelPath.toLowerCase().endsWith('.jpeg')) {
+            thumbName = `${f.device}__${safeRelPath}`;
+            // Normalize jpeg to jpg if daemon does? Daemon check: `if safe_base.lower().endswith('.jpg')` -> keeps it.
+            // If `endswith('.jpeg')` -> goes to else -> adds `.jpg`. So `foo.jpeg.jpg`.
+
+            if (safeRelPath.toLowerCase().endsWith('.jpeg')) thumbName += '.jpg';
+        } else {
+            thumbName = `${f.device}__${safeRelPath}.jpg`;
+        }
+        const thumbSrc = `/resource/thumbnail/${state.user.userid}/${thumbName}`;
+        const fullSrc = `/resource/image/${state.user.userid}/${f.device}/${f.rel_path}`;
+
+        const img = document.createElement('img');
+        img.src = thumbSrc;
+        img.loading = "lazy";
+        img.onload = () => img.classList.add('loaded');
+        item.appendChild(img);
+
+        item.onclick = () => {
+            const isVideo = f.rel_path.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+            state.viewerImage = { src: fullSrc, type: isVideo ? 'video' : 'image' };
+            render();
+        };
+
+        grid.appendChild(item);
+    });
+
+    return grid;
+}
+
+// ... (PhotoGallery remains separate or we can merge?)
+
+
+// Global metadata state
+let currentMetadata = null;
+
+async function fetchMetadata(image) {
+    currentMetadata = { loading: true };
+    try {
+        let url = `/api/photo/metadata?userid=${encodeURIComponent(state.user.userid)}`;
+
+        // Prefer ID if available
+        if (image.id) {
+            url += `&id=${encodeURIComponent(image.id)}`;
+        } else if (image.path) {
+            // Explicit path provided (e.g. from FileExplorer)
+            url += `&path=${encodeURIComponent(image.path)}`;
+        } else {
+            // Fallback to path extraction if ID not available (e.g. from FileExplorer)
+            // image.src is /resource/image/<userid>/<device>/<rel_path>
+            // exact logic in parseImagePath: url: `/resource/image/${state.user.userid}/${device}/${finalPath}`
+
+            const prefix = `/resource/image/${state.user.userid}/`;
+            if (image.src.startsWith(prefix)) {
+                // extracted: <device>/<rel_path>
+                const pathPart = image.src.substring(prefix.length);
+                // pathPart is raw URL encoded? Chrome handles it, but let's just pass it.
+                // It might need decoding if it was encoded in src.
+                // Usually src is URL encoded.
+                url += `&path=${encodeURIComponent(decodeURIComponent(pathPart))}`;
+            }
+        }
+
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.found) {
+            currentMetadata = data;
+        } else {
+            currentMetadata = { found: false };
+        }
+    } catch (e) {
+        currentMetadata = { error: true };
+        console.error("Metadata fetch error", e);
+    }
+    render();
+}
+
+function MediaViewer() {
+    if (!state.viewerImage) {
+        currentMetadata = null;
+        return document.createTextNode('');
+    }
+
+    // Trigger fetch if not loaded yet for this image
+    // simple check: if currentMetadata is null, fetch. 
+    // note: render() is called often, so we need a way to know we are fetching for THIS image.
+    // We can stick the metadata on the state.viewerImage object itself or checking a tracking var.
+    // Let's use a property on state.viewerImage to avoid infinite loops if we used a global without ID check.
+
+    if (!state.viewerImage._metaFetched) {
+        state.viewerImage._metaFetched = true;
+        fetchMetadata(state.viewerImage);
+    }
+
+    const el = document.createElement('div');
+    el.className = 'lightbox active';
+
+    let mediaContent = '';
+    if (state.viewerImage.type === 'video') {
+        mediaContent = `<video src="${state.viewerImage.src}" controls autoplay style="max-width:100%; max-height:100%; transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease"></video>`;
+    } else {
+        mediaContent = `<img src="${state.viewerImage.src}" style="transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease" />`;
+    }
+
+    // Metadata Sidebar Content
+    let metaContent = '';
+    if (currentMetadata && currentMetadata.loading) {
+        metaContent = '<div class="spinner"></div>';
+    } else if (currentMetadata && currentMetadata.found) {
+        const m = currentMetadata;
+
+        // Format dates
+        const dateTaken = m.date_taken ? new Date(m.date_taken).toLocaleString() : 'Unknown';
+        const dateUploaded = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'Unknown';
+
+        metaContent = `
+            <div class="meta-title">${m.filename}</div>
+            
+            <div class="meta-row">
+                <div class="meta-label">Date Taken</div>
+                <div class="meta-value">${dateTaken}</div>
+            </div>
+            
+            <div class="meta-row">
+                <div class="meta-label">Date Uploaded</div>
+                <div class="meta-value">${dateUploaded}</div>
+            </div>
+            
+            ${m.size ? `
+            <div class="meta-row">
+                <div class="meta-label">Size</div>
+                <div class="meta-value">${formatSize(m.size)}</div>
+            </div>` : ''}
+            
+            ${(m.location_lat && m.location_lon) ? `
+            <div class="meta-row">
+                <div class="meta-label">GPS Location</div>
+                <div class="meta-value">
+                    <a href="https://www.google.com/maps/search/?api=1&query=${m.location_lat},${m.location_lon}" target="_blank" style="color:var(--accent-color)">
+                        ${m.location_lat.toFixed(4)}, ${m.location_lon.toFixed(4)}
+                    </a>
+                </div>
+            </div>` : ''}
+             
+            ${m.description ? `
+            <div class="meta-row">
+                <div class="meta-label">Description</div>
+                <div class="meta-value">${m.description}</div>
+            </div>` : ''}
+
+            <!-- Zoom Control -->
+            <div class="meta-row" style="margin-top:20px; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+                <div class="meta-label">Zoom</div>
+                <div class="meta-value" style="display:flex; align-items:center; gap:10px;">
+                    <i class="fa-solid fa-magnifying-glass-minus" style="font-size:12px; color:var(--text-secondary)"></i>
+                    <input type="range" min="20" max="300" value="${state.zoomLevel || 100}" class="zoom-slider" style="flex:1" oninput="updateZoom(this.value)">
+                    <i class="fa-solid fa-magnifying-glass-plus" style="font-size:12px; color:var(--text-secondary)"></i>
+                    <span id="zoomValue" style="min-width:40px; text-align:right; font-size:12px; color:var(--text-secondary)">${state.zoomLevel || 100}%</span>
+                </div>
+            </div>
+        `;
+    } else {
+        metaContent = `<div style="color:var(--text-secondary); padding-top:20px; text-align:center;">No metadata available</div>`;
+    }
+
+    el.innerHTML = `
+        <div class="lightbox-content">
+            <div class="lightbox-media">
+                 ${mediaContent}
+            </div>
+            <div class="lightbox-sidebar" onclick="event.stopPropagation()">
+                ${metaContent}
+            </div>
+        </div>
+        <div class="close-help">Press ESC to close</div>
+    `;
+
+    el.onclick = (e) => {
+        // Close if clicking outside the content area (on the background)
+        if (e.target === el || e.target.classList.contains('lightbox-content') || e.target.classList.contains('lightbox-media')) {
+            state.viewerImage = null;
+            currentMetadata = null;
+            state.zoomLevel = 100;
+            render();
+        }
+    };
+
+    return el;
+}
+
+function Dashboard() {
+    const container = document.createElement('div');
+    container.className = 'dashboard-container';
+
+    if (!state.dashboardStats) {
+        if (!state.loadingStats) {
+            state.loadingStats = true;
+            fetchDashboardStats().finally(() => { state.loadingStats = false; });
+        }
+        container.innerHTML = '<div class="loading">Loading stats...</div>';
+        return container;
+    }
+
+    const s = state.dashboardStats;
+    const sys = s.system || {};
+    const media = s.media || {};
+    const storage = s.storage || {};
+    const ai = s.ai || {};
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'dashboard-header';
+    header.innerHTML = `
+        <h1>Welcome Back, ${state.user.userid}</h1>
+        <p class="subtitle">System Overview & Statistics</p>
+    `;
+    container.appendChild(header);
+
+    // Grid
+    const grid = document.createElement('div');
+    grid.className = 'dashboard-grid';
+
+    // 1. Storage Card (Wide)
+    const storageCard = document.createElement('div');
+    storageCard.className = 'dash-card wide';
+    const usedGB = (storage.used_bytes / (1024 * 1024 * 1024)).toFixed(2);
+    const totalGB = sys.disk_total ? (sys.disk_total / (1024 * 1024 * 1024)).toFixed(0) : '?';
+    const percent = sys.disk_percent || 0;
+
+    storageCard.innerHTML = `
+        <div class="card-header"><i class="fa-solid fa-hard-drive"></i> Storage Usage</div>
+        <div class="storage-visual">
+            <div class="storage-info">
+                <span class="big-stat">${usedGB} GB</span>
+                <span class="sub-stat">of ${totalGB} GB used</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" style="width: ${percent}%"></div>
+            </div>
+            <div class="storage-details">
+                <span>Free: ${sys.disk_free ? (sys.disk_free / (1024 * 1024 * 1024)).toFixed(2) : '?'} GB</span>
+                <span>${storage.file_count ? storage.file_count.toLocaleString() : 0} Files</span>
+            </div>
+        </div>
+    `;
+    grid.appendChild(storageCard);
+
+    // 2. Media Counts
+    const mediaCard = document.createElement('div');
+    mediaCard.className = 'dash-card';
+    mediaCard.innerHTML = `
+        <div class="card-header"><i class="fa-solid fa-photo-film"></i> Library</div>
+        <div class="stat-grid">
+            <div class="stat-item">
+                <i class="fa-solid fa-image" style="color:#4facfe"></i>
+                <div class="stat-value">${media.photos || 0}</div>
+                <div class="stat-label">Photos</div>
+            </div>
+            <div class="stat-item">
+                <i class="fa-solid fa-video" style="color:#f093fb"></i>
+                <div class="stat-value">${media.videos || 0}</div>
+                <div class="stat-label">Videos</div>
+            </div>
+            <div class="stat-item">
+                <i class="fa-solid fa-mobile-screen" style="color:#ffecd2"></i>
+                <div class="stat-value">${media.screenshots || 0}</div>
+                <div class="stat-label">Screenshots</div>
+            </div>
+            <div class="stat-item">
+                <i class="fa-solid fa-book" style="color:#a18cd1"></i>
+                <div class="stat-value">${media.albums || 0}</div>
+                <div class="stat-label">Albums</div>
+            </div>
+        </div>
+    `;
+    grid.appendChild(mediaCard);
+
+    // 3. AI Processing
+    const aiCard = document.createElement('div');
+    aiCard.className = 'dash-card';
+    aiCard.innerHTML = `
+        <div class="card-header"><i class="fa-solid fa-wand-magic-sparkles"></i> AI Intelligence</div>
+        <div class="ai-stats">
+            <div class="ai-row">
+                <span>People Identified</span>
+                <span class="badge">${ai.people_count || 0}</span>
+            </div>
+            <div class="ai-row">
+                <span>Faces Processed</span>
+                <span class="badge secondary">${ai.processed_faces || 0}</span>
+            </div>
+             <div class="ai-row">
+                <span>Descriptions Generated</span>
+                <span class="badge secondary">${ai.processed_desc || 0}</span>
+            </div>
+        </div>
+    `;
+    grid.appendChild(aiCard);
+
+    // 4. System Health
+    const sysCard = document.createElement('div');
+    sysCard.className = 'dash-card';
+    const cpu = sys.cpu_percent || 0;
+    const mem = sys.memory_percent || 0;
+
+    // Uptime formatter
+    const uptimeSec = sys.uptime_seconds || 0;
+    const d = Math.floor(uptimeSec / (3600 * 24));
+    const h = Math.floor(uptimeSec % (3600 * 24) / 3600);
+    const m = Math.floor(uptimeSec % 3600 / 60);
+    const uptimeStr = `${d}d ${h}h ${m}m`;
+
+    sysCard.innerHTML = `
+        <div class="card-header"><i class="fa-solid fa-server"></i> System Health</div>
+        <div class="sys-stats">
+             <div class="sys-row">
+                <span>CPU Load</span>
+                <div class="mini-bar-container"><div class="mini-bar" style="width:${cpu}%"></div></div>
+                <span>${cpu}%</span>
+            </div>
+            <div class="sys-row">
+                <span>Memory</span>
+                <div class="mini-bar-container"><div class="mini-bar" style="width:${mem}%"></div></div>
+                <span>${mem}%</span>
+            </div>
+            <div class="sys-info-text">
+                OS: ${sys.platform || 'Linux'} <br>
+                Uptime: ${uptimeStr}
+            </div>
+        </div>
+    `;
+    grid.appendChild(sysCard);
+
+    container.appendChild(grid);
+    return container;
+}
+
+function ContentArea() {
+    const el = document.createElement('div');
+    el.className = 'content-area';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'content-header';
+    header.innerHTML = `<div class="content-title">${state.view.charAt(0).toUpperCase() + state.view.slice(1)}</div>`;
+
+    // Refresh Btn
+    const refBtn = document.createElement('button');
+    refBtn.className = 'refresh-btn';
+    refBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i>';
+    refBtn.onclick = () => {
+        if (state.view === 'files') fetchExplorer(state.currentPath);
+        else if (state.view === 'people') fetchPeople();
+        else if (state.view === 'search') runSearch();
+        else if (state.view === 'photos') fetchTimeline();
+        else if (state.view === 'albums') fetchAlbums();
+        else if (state.view === 'discover') fetchMemories();
+        else if (state.view === 'videos') fetchTimeline('video');
+    };
+    header.appendChild(refBtn);
+    el.appendChild(header);
+
+    // Body
+    if (state.loading) {
+        const spin = document.createElement('div');
+        spin.className = 'spinner';
+        el.appendChild(spin);
+        return el;
+    }
+
+    if (state.view === 'files') {
+        el.appendChild(FileExplorer());
+    } else if (state.view === 'dashboard') {
+        el.appendChild(Dashboard());
+    } else if (state.view === 'photos') {
+        el.appendChild(TimelineView());
+    } else if (state.view === 'screenshots') {
+        el.appendChild(TimelineView());
+    } else if (state.view === 'people') {
+        el.appendChild(PeopleGallery());
+    } else if (state.view === 'search') {
+        el.appendChild(SearchInterface());
+    } else if (state.view === 'videos') {
+        el.appendChild(TimelineView()); // Reuse timeline for videos
+    } else if (state.view === 'discover') {
+        el.appendChild(DiscoverView());
+    } else if (state.view === 'albums') {
+        el.appendChild(AlbumsView());
+    } else {
+        el.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">Coming soon...</div>`;
+    }
+
+    return el;
+}
+
+function App() {
+    const div = document.createElement('div');
+    div.className = 'app-layout';
+    div.appendChild(Sidebar());
+    div.appendChild(ContentArea());
+    div.appendChild(MediaViewer());
+    return div;
+}
+
+function render() {
+    const app = document.getElementById('app');
+    app.innerHTML = '';
+
+    if (!state.user) {
+        app.appendChild(LoginScreen());
+    } else {
+        app.appendChild(App());
+    }
+
+    // Restore scroll position
+    if (state.savedScrollPosition > 0) {
+        setTimeout(() => {
+            const contentArea = document.querySelector('.content-area');
+            if (contentArea) {
+                contentArea.scrollTop = state.savedScrollPosition;
+                // Only clear if we are NOT in viewer mode (i.e. we fully restored the view)
+                if (!state.viewerImage) {
+                    state.savedScrollPosition = 0;
+                }
+            }
+        }, 0);
+    }
+}
+
+// Global Inputs
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.viewerImage) {
+        state.viewerImage = null;
+        state.zoomLevel = 100;
+        render();
+    }
+});
+
+// Expose updateZoom to global scope for inline event handlers
+window.updateZoom = updateZoom;
+
+// Initial Render
+// Initial Render
+// Initial Render
+checkSession();
+
+async function checkSession() {
+    try {
+        const res = await fetch('/api/auth/check');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.authenticated) {
+                state.user = { userid: data.userid };
+                render(); // Render immediately
+
+                // Fetch data in background
+                scanFiles();
+                refreshViewData();
+            }
+        }
+    } catch (e) { console.error("Session check failed", e); }
+    // If not authenticated, render will show login screen (default)
+    if (!state.user) render();
+}

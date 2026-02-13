@@ -1,0 +1,14 @@
+--- Photo Type Summary ---
+Type: NULL - Count: 1
+Type: photo - Count: 23
+Type: screenshot - Count: 33
+
+--- Photos with NULL type ---
+ID: 4, Path: VID20251219230638.mp4
+
+--- Screenshots with ACTUAL face mappings (Should be 0) ---
+Screenshots with faces mapped: 0
+
+--- Screenshots with descriptions (Should be 0) ---
+Screenshots with descriptions: 0
+Done.
