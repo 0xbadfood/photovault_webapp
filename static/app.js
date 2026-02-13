@@ -38,17 +38,19 @@ const state = {
     viewerImage: null, // { src: string } or null
     savedScrollPosition: 0, // Saved scroll position for restoring after viewer close
     videoVolume: 1.0,
-    zoomLevel: 100 // %
+    zoomLevel: 100, // %
+    panX: 0,
+    panY: 0,
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0
 };
 
 function updateZoom(val) {
     state.zoomLevel = parseInt(val);
     const zoomValEl = document.getElementById('zoomValue');
     if (zoomValEl) zoomValEl.textContent = val + '%';
-    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
-    if (media) {
-        media.style.transform = `scale(${val / 100})`;
-    }
+    updateViewerTransform();
 }
 
 // --- API Calls ---
@@ -1892,17 +1894,75 @@ async function fetchMetadata(image) {
     render();
 }
 
+// --- Zoom and Pan Helpers ---
+
+function updateViewerTransform() {
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) {
+        media.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoomLevel / 100})`;
+    }
+}
+
+function handleWheel(e) {
+    if (!state.viewerImage) return;
+    e.preventDefault();
+
+    const delta = Math.sign(e.deltaY) * -1;
+    const step = 10;
+    let newZoom = state.zoomLevel + (delta * step);
+
+    // Clamp zoom
+    if (newZoom < 20) newZoom = 20;
+    if (newZoom > 500) newZoom = 500;
+
+    if (newZoom !== state.zoomLevel) {
+        state.zoomLevel = newZoom;
+        updateZoomUI(newZoom);
+        updateViewerTransform();
+    }
+}
+
+function handleMouseDown(e) {
+    if (!state.viewerImage) return;
+    // Only allow drag if zoomed in or if we want to allow panning nicely
+    if (e.button !== 0) return; // Only left click
+
+    state.isDragging = true;
+    state.dragStartX = e.clientX - state.panX;
+    state.dragStartY = e.clientY - state.panY;
+
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) media.style.cursor = 'grabbing';
+}
+
+function handleMouseMove(e) {
+    if (!state.isDragging || !state.viewerImage) return;
+    e.preventDefault();
+
+    state.panX = e.clientX - state.dragStartX;
+    state.panY = e.clientY - state.dragStartY;
+
+    updateViewerTransform();
+}
+
+function handleMouseUp() {
+    state.isDragging = false;
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) media.style.cursor = 'grab';
+}
+
+function updateZoomUI(val) {
+    const zoomValEl = document.getElementById('zoomValue');
+    const rangeInput = document.querySelector('.zoom-slider');
+    if (zoomValEl) zoomValEl.textContent = val + '%';
+    if (rangeInput) rangeInput.value = val;
+}
+
 function MediaViewer() {
     if (!state.viewerImage) {
         currentMetadata = null;
         return document.createTextNode('');
     }
-
-    // Trigger fetch if not loaded yet for this image
-    // simple check: if currentMetadata is null, fetch. 
-    // note: render() is called often, so we need a way to know we are fetching for THIS image.
-    // We can stick the metadata on the state.viewerImage object itself or checking a tracking var.
-    // Let's use a property on state.viewerImage to avoid infinite loops if we used a global without ID check.
 
     if (!state.viewerImage._metaFetched) {
         state.viewerImage._metaFetched = true;
@@ -1913,20 +1973,21 @@ function MediaViewer() {
     el.className = 'lightbox active';
 
     let mediaContent = '';
+    // Ensure we start with transform
+    const transformStyle = `transform: translate(${state.panX}px, ${state.panY}px) scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease`;
+
     if (state.viewerImage.type === 'video') {
-        mediaContent = `<video src="${state.viewerImage.src}" controls autoplay style="max-width:100%; max-height:100%; transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease"></video>`;
+        mediaContent = `<video src="${state.viewerImage.src}" controls autoplay style="max-width:100%; max-height:100%; ${transformStyle}" class="viewer-media"></video>`;
     } else {
-        mediaContent = `<img src="${state.viewerImage.src}" style="transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease" />`;
+        mediaContent = `<img src="${state.viewerImage.src}" style="${transformStyle}" class="viewer-media" />`;
     }
 
-    // Metadata Sidebar Content
+    // Metadata Sidebar Content (Same as before)
     let metaContent = '';
     if (currentMetadata && currentMetadata.loading) {
         metaContent = '<div class="spinner"></div>';
     } else if (currentMetadata && currentMetadata.found) {
         const m = currentMetadata;
-
-        // Format dates
         const dateTaken = m.date_taken ? new Date(m.date_taken).toLocaleString() : 'Unknown';
         const dateUploaded = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'Unknown';
 
@@ -1970,7 +2031,7 @@ function MediaViewer() {
                 <div class="meta-label">Zoom</div>
                 <div class="meta-value" style="display:flex; align-items:center; gap:10px;">
                     <i class="fa-solid fa-magnifying-glass-minus" style="font-size:12px; color:var(--text-secondary)"></i>
-                    <input type="range" min="20" max="300" value="${state.zoomLevel || 100}" class="zoom-slider" style="flex:1" oninput="updateZoom(this.value)">
+                    <input type="range" min="20" max="500" value="${state.zoomLevel || 100}" class="zoom-slider" style="flex:1" oninput="updateZoomUI(this.value)">
                     <i class="fa-solid fa-magnifying-glass-plus" style="font-size:12px; color:var(--text-secondary)"></i>
                     <span id="zoomValue" style="min-width:40px; text-align:right; font-size:12px; color:var(--text-secondary)">${state.zoomLevel || 100}%</span>
                 </div>
@@ -1982,7 +2043,7 @@ function MediaViewer() {
 
     el.innerHTML = `
         <div class="lightbox-content">
-            <div class="lightbox-media">
+            <div class="lightbox-media" id="mediaContainer">
                  ${mediaContent}
             </div>
             <div class="lightbox-sidebar" onclick="event.stopPropagation()">
@@ -1992,12 +2053,41 @@ function MediaViewer() {
         <div class="close-help">Press ESC to close</div>
     `;
 
+    // Event Listeners for Interaction
+    setTimeout(() => {
+        const container = el.querySelector('#mediaContainer');
+        if (container) {
+            container.addEventListener('wheel', handleWheel, { passive: false });
+            container.addEventListener('mousedown', handleMouseDown);
+            container.addEventListener('mousemove', handleMouseMove);
+            container.addEventListener('mouseup', handleMouseUp);
+            container.addEventListener('mouseleave', handleMouseUp); // Stop drag if leaves
+
+            // Prevent default drag behavior of images
+            const img = container.querySelector('img');
+            if (img) {
+                img.ondragstart = (e) => e.preventDefault();
+                img.style.cursor = 'grab';
+            }
+            const video = container.querySelector('video');
+            if (video) {
+                video.style.cursor = 'grab';
+            }
+        }
+    }, 0);
+
     el.onclick = (e) => {
         // Close if clicking outside the content area (on the background)
+        // Check if we were dragging? If so, don't close.
+        // We can use a small threshold or check isDragging.
+        if (state.isDragging) return;
+
         if (e.target === el || e.target.classList.contains('lightbox-content') || e.target.classList.contains('lightbox-media')) {
             state.viewerImage = null;
             currentMetadata = null;
             state.zoomLevel = 100;
+            state.panX = 0;
+            state.panY = 0;
             render();
         }
     };
@@ -2249,6 +2339,8 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.viewerImage) {
         state.viewerImage = null;
         state.zoomLevel = 100;
+        state.panX = 0;
+        state.panY = 0;
         render();
     }
 });

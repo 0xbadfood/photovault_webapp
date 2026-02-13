@@ -275,6 +275,18 @@ body {
     max-height: 100%;
     object-fit: contain;
     border-radius: 4px;
+    cursor: grab;
+    transform-origin: center;
+}
+
+.lightbox video {
+    cursor: grab;
+    transform-origin: center;
+}
+
+.lightbox img:active,
+.lightbox video:active {
+    cursor: grabbing;
 }
 
 .lightbox-content {
