@@ -71,6 +71,8 @@ def init_db(userid):
             cover_photo_id INTEGER,
             album_type TEXT DEFAULT 'manual',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            owner_email TEXT,
+            source_album_id INTEGER,
             FOREIGN KEY(cover_photo_id) REFERENCES photos(id)
         )
     ''')
