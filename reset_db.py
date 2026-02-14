@@ -8,7 +8,8 @@ DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '../backup/data'))
 
 def reset_database(user_email=None):
     """
-    Per-user database and thumbnail reset.
+    Complete per-user reset: nuke database, thumbnails, shared files, face data.
+    Preserves only original photos (device directories with actual files).
     If user_email is provided, only that user is reset.
     Otherwise, all users are reset.
     """
@@ -25,14 +26,16 @@ def reset_database(user_email=None):
         return
     
     print("=" * 60)
-    print("COMPLETE DATABASE RESET")
+    print("COMPLETE DATABASE & DATA RESET")
     print("=" * 60)
     print(f"\nUsers to reset: {', '.join(users)}")
-    print("\nThis will:")
-    print("  • Delete ALL photo records from each user's database")
-    print("  • Clear all people, albums, and mappings")
-    print("  • Remove ALL thumbnail files")
-    print("  • Daemon will need to re-scan and re-process everything")
+    print("\nThis will DELETE:")
+    print("  • Database (photovault.db) — all tables dropped & recreated")
+    print("  • ALL thumbnails (photo + face thumbnails)")
+    print("  • ALL shared files and symlinks (shared/ directory)")
+    print("\nThis will PRESERVE:")
+    print("  • Original photos in device directories")
+    print("\nDaemon will need to re-scan and re-process everything.")
     print("\n" + "=" * 60)
     
     confirm = input("\nType 'RESET' to confirm complete reset: ")
@@ -44,61 +47,58 @@ def reset_database(user_email=None):
         user_path = os.path.join(DATA_DIR, userid)
         db_path = os.path.join(user_path, 'photovault.db')
         
-        print(f"\n--- Resetting user: {userid} ---")
+        print(f"\n{'─' * 50}")
+        print(f"Resetting user: {userid}")
+        print(f"{'─' * 50}")
         
-        # Step 1: Reset Database
+        # Step 1: Nuke the database entirely
         if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            
+            print("  [1/3] Nuking database...")
             try:
-                print("  [1/2] Resetting database...")
+                os.remove(db_path)
+                print("    ✓ Deleted photovault.db")
                 
-                c.execute("DROP TABLE IF EXISTS photos")
-                print("    ✓ Dropped photos table")
-                
-                c.execute("DROP TABLE IF EXISTS photo_people")
-                print("    ✓ Dropped photo_people table")
-                
-                c.execute("DROP TABLE IF EXISTS people")
-                print("    ✓ Dropped people table")
-                
-                c.execute("DROP TABLE IF EXISTS album_photos")
-                print("    ✓ Dropped album_photos table")
-                
-                c.execute("DROP TABLE IF EXISTS albums")
-                print("    ✓ Dropped albums table")
-                
-                try:
-                    c.execute("DELETE FROM sqlite_sequence")
-                except:
-                    pass
-                print("    ✓ Reset ID counters")
-                
-                conn.commit()
-                print("  ✅ Database cleared")
-                
+                # Recreate with fresh schema
+                import database
+                database.init_db(userid)
+                print("    ✓ Recreated with fresh schema")
             except Exception as e:
-                print(f"  ❌ Error resetting database: {e}")
-                conn.rollback()
-            finally:
-                conn.close()
+                print(f"    ❌ Error: {e}")
         else:
-            print(f"  ⚠ No database found at {db_path}")
+            print(f"  [1/3] No database found (skipping)")
         
-        # Step 2: Remove thumbnails
+        # Step 2: Nuke ALL thumbnails (photo thumbnails + face thumbnails)
         thumbs_dir = os.path.join(user_path, 'thumbnails')
         if os.path.exists(thumbs_dir):
-            print("  [2/2] Removing thumbnails...")
+            print("  [2/3] Removing all thumbnails...")
             try:
-                thumb_count = len([f for f in os.listdir(thumbs_dir) if os.path.isfile(os.path.join(thumbs_dir, f))])
+                files = [f for f in os.listdir(thumbs_dir) if os.path.isfile(os.path.join(thumbs_dir, f))]
+                thumb_count = len(files)
+                face_count = len([f for f in files if f.startswith('face_')])
                 shutil.rmtree(thumbs_dir)
                 os.makedirs(thumbs_dir, exist_ok=True)
-                print(f"    ✓ Removed {thumb_count} thumbnails")
+                print(f"    ✓ Removed {thumb_count} thumbnails ({face_count} face thumbnails)")
             except Exception as e:
-                print(f"    ❌ Error removing thumbnails: {e}")
+                print(f"    ❌ Error: {e}")
         else:
-            print("  ⚠ No thumbnails directory found")
+            print("  [2/3] No thumbnails directory (skipping)")
+        
+        # Step 3: Nuke shared files directory (symlinks to shared photos)
+        shared_dir = os.path.join(user_path, 'shared')
+        if os.path.exists(shared_dir):
+            print("  [3/3] Removing shared files...")
+            try:
+                file_count = 0
+                for root, dirs, files in os.walk(shared_dir):
+                    file_count += len(files)
+                shutil.rmtree(shared_dir)
+                print(f"    ✓ Removed shared directory ({file_count} files/symlinks)")
+            except Exception as e:
+                print(f"    ❌ Error: {e}")
+        else:
+            print("  [3/3] No shared directory (skipping)")
+        
+        print(f"  ✅ User {userid} reset complete")
     
     print("\n" + "=" * 60)
     print("✅ RESET COMPLETE!")
@@ -106,7 +106,7 @@ def reset_database(user_email=None):
     print("\nNext steps:")
     print("  1. Run: python3 daemon.py")
     print("  2. Daemon will re-scan and re-process everything")
-    print("\n" + "=" * 60)
+    print("=" * 60)
 
 if __name__ == '__main__':
     email = sys.argv[1] if len(sys.argv) > 1 else None

@@ -34,21 +34,26 @@ const state = {
     // Discover State
     memories: [], // [{type, title, description, photos}]
 
+    // Sharing State
+    sharedPhotos: {}, // { ownerEmail: [photos] }
+
     loading: false,
     viewerImage: null, // { src: string } or null
     savedScrollPosition: 0, // Saved scroll position for restoring after viewer close
     videoVolume: 1.0,
-    zoomLevel: 100 // %
+    zoomLevel: 100, // %
+    panX: 0,
+    panY: 0,
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0
 };
 
 function updateZoom(val) {
     state.zoomLevel = parseInt(val);
     const zoomValEl = document.getElementById('zoomValue');
     if (zoomValEl) zoomValEl.textContent = val + '%';
-    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
-    if (media) {
-        media.style.transform = `scale(${val / 100})`;
-    }
+    updateViewerTransform();
 }
 
 // --- API Calls ---
@@ -71,6 +76,7 @@ async function login(userid, password) {
             fetchDashboardStats();
             fetchExplorer('');
             fetchPeople();
+            fetchAlbums(false); // Pre-fetch albums
         } else {
             alert(data.error || 'Login failed');
         }
@@ -79,6 +85,8 @@ async function login(userid, password) {
         console.error(e);
     }
 }
+
+
 
 async function scanFiles() {
     try {
@@ -423,9 +431,12 @@ async function fetchAlbumPhotos(albumId) {
         const res = await fetch(url);
         const data = await res.json();
         if (res.ok && data.photos) {
+            // Find album metadata from state.albums
+            const albumMeta = state.albums.find(a => a.id === albumId);
             state.currentAlbum = {
                 id: albumId,
-                photos: data.photos
+                photos: data.photos,
+                album_type: albumMeta ? albumMeta.album_type : 'manual'
             };
         }
     } catch (e) {
@@ -487,6 +498,7 @@ function refreshViewData() {
     else if (view === 'people' || view === 'search') fetchPeople();
     else if (view === 'discover') fetchMemories();
     else if (view === 'albums') fetchAlbums();
+    else if (view === 'shared') fetchSharedPhotos();
     else if (view === 'files') fetchExplorer(state.currentPath || '');
     else if (view === 'dashboard') fetchDashboardStats();
 }
@@ -784,13 +796,15 @@ function LoginScreen() {
         <div class="login-box">
             <img src="/static/logo.png" style="width: 80px; margin-bottom: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
             <h1>Photos</h1>
-            <div class="input-group">
-                <input type="text" id="userid" placeholder="Apple ID (Email)" >
+            <div id="userLoginSection">
+                <div class="input-group">
+                    <input type="text" id="userid" placeholder="Apple ID (Email)">
+                </div>
+                <div class="input-group">
+                    <input type="password" id="password" placeholder="Password" value="passw0rd">
+                </div>
+                <button class="login-btn" id="loginBtn">Sign In</button>
             </div>
-            <div class="input-group">
-                <input type="password" id="password" placeholder="Password" value="passw0rd">
-            </div>
-            <button class="login-btn" id="loginBtn">Sign In</button>
         </div>
     `;
 
@@ -805,6 +819,8 @@ function LoginScreen() {
         if (e.key === 'Enter') triggerLogin();
     };
 
+
+
     return div;
 }
 
@@ -813,17 +829,20 @@ function Sidebar() {
     el.className = 'sidebar';
     el.innerHTML = `<div class="sidebar-title">Library</div>`;
 
-    const items = [
+    const allItems = [
         { id: 'dashboard', icon: 'fa-gauge-high', label: 'Dashboard' },
         { id: 'files', icon: 'fa-folder', label: 'Files' },
         { id: 'photos', icon: 'fa-images', label: 'Photos' },
         { id: 'screenshots', icon: 'fa-mobile-screen', label: 'Screenshots' },
         { id: 'videos', icon: 'fa-video', label: 'Videos' },
         { id: 'albums', icon: 'fa-book', label: 'Albums' },
+        { id: 'shared', icon: 'fa-share-nodes', label: 'Shared with me' },
         { id: 'people', icon: 'fa-users', label: 'People' },
         { id: 'discover', icon: 'fa-sparkles', label: 'Discover' },
         { id: 'search', icon: 'fa-search', label: 'Search' }
     ];
+
+    const items = allItems;
 
     items.forEach(item => {
         const nav = document.createElement('div');
@@ -1613,7 +1632,6 @@ function AlbumsView() {
     const header = document.createElement('div');
     header.className = 'albums-header';
     header.innerHTML = `
-        <h2>Albums</h2>
         <button class="create-album-btn" id="createAlbumBtn">
             <i class="fa-solid fa-plus"></i> Create Album
         </button>
@@ -1636,10 +1654,12 @@ function AlbumsView() {
     const grid = document.createElement('div');
     grid.className = 'albums-grid';
 
-    if (state.albums.length === 0) {
+    const albumsToShow = state.albums;
+
+    if (albumsToShow.length === 0) {
         grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No albums yet. Create one to get started!</div>`;
     } else {
-        state.albums.forEach(album => {
+        albumsToShow.forEach(album => {
             const card = document.createElement('div');
             card.className = 'album-card';
 
@@ -1665,6 +1685,13 @@ function AlbumsView() {
                 badge.className = 'album-badge';
                 badge.textContent = 'Auto';
                 info.appendChild(badge);
+            } else if (album.album_type === 'shared') {
+                const badge = document.createElement('span');
+                badge.className = 'album-badge';
+                badge.textContent = 'Shared';
+                badge.style.color = '#34c759';
+                badge.style.background = 'rgba(52, 199, 89, 0.2)';
+                info.appendChild(badge);
             }
             card.appendChild(info);
 
@@ -1678,6 +1705,20 @@ function AlbumsView() {
             };
             card.appendChild(delBtn);
 
+            // Share button (for manual albums that don't contain shared photos)
+            if (album.album_type === 'manual' && !album.has_shared_photos) {
+                const shareBtn = document.createElement('button');
+                shareBtn.className = 'album-delete-btn'; // reuse styling
+                shareBtn.style.right = '44px';
+                shareBtn.innerHTML = '<i class="fa-solid fa-share-nodes"></i>';
+                shareBtn.title = 'Share Album';
+                shareBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    openAlbumShareModal(album);
+                };
+                card.appendChild(shareBtn);
+            }
+
             // Click to view album
             card.onclick = () => {
                 fetchAlbumPhotos(album.id);
@@ -1689,6 +1730,119 @@ function AlbumsView() {
 
     container.appendChild(grid);
     return container;
+}
+
+function openAlbumShareModal(album) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.style.width = '500px';
+
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Share Album: ${album.name}</div>
+            <button class="modal-close"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="modal-body">
+            <p style="font-size:13px; color:var(--text-secondary); margin-bottom:10px;">Share a full copy of this album with another user.</p>
+            <div class="user-list" id="albumShareUserList">
+                <div style="text-align:center; padding:20px; color:var(--text-secondary);">Loading users...</div>
+            </div>
+            <button class="share-submit-btn" id="albumShareSubmitBtn" disabled>Share Album</button>
+        </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    modal.querySelector('.modal-close').onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    // Load users list (same pattern as photo sharing)
+    const selectedUsers = new Set();
+    fetch('/api/users/list')
+        .then(r => r.json())
+        .then(data => {
+            const listContainer = modal.querySelector('#albumShareUserList');
+            listContainer.innerHTML = '';
+
+            if (!data.users || data.users.length === 0) {
+                listContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--text-secondary);">No other users found.</div>';
+                return;
+            }
+
+            data.users.forEach(user => {
+                const item = document.createElement('div');
+                item.className = 'user-list-item';
+                item.innerHTML = `
+                    <div class="user-avatar">${user.email[0].toUpperCase()}</div>
+                    <div class="user-email">${user.email}</div>
+                    <div class="user-check"><i class="fa-solid fa-check"></i></div>
+                `;
+
+                item.onclick = () => {
+                    if (selectedUsers.has(user.email)) {
+                        selectedUsers.delete(user.email);
+                        item.classList.remove('selected');
+                    } else {
+                        selectedUsers.add(user.email);
+                        item.classList.add('selected');
+                    }
+
+                    const btn = modal.querySelector('#albumShareSubmitBtn');
+                    btn.disabled = selectedUsers.size === 0;
+                    btn.textContent = selectedUsers.size > 0 ? `Share with ${selectedUsers.size} user${selectedUsers.size > 1 ? 's' : ''}` : 'Share Album';
+                };
+
+                listContainer.appendChild(item);
+            });
+        })
+        .catch(err => {
+            console.error(err);
+            modal.querySelector('#albumShareUserList').innerHTML = '<div style="text-align:center; padding:20px; color:var(--text-secondary);">Error loading users.</div>';
+        });
+
+    // Share submit
+    const submitBtn = modal.querySelector('#albumShareSubmitBtn');
+    submitBtn.onclick = async () => {
+        if (selectedUsers.size === 0) return;
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Sharing...';
+
+        let successCount = 0;
+        let errorMsg = '';
+
+        for (const email of selectedUsers) {
+            try {
+                const res = await fetch(`/api/albums/${album.id}/share/user`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const d = await res.json();
+                if (res.ok) {
+                    successCount++;
+                } else {
+                    errorMsg = d.error || 'Share failed';
+                }
+            } catch (e) {
+                console.error(e);
+                errorMsg = 'Error sharing album';
+            }
+        }
+
+        if (successCount > 0) {
+            alert(`Album shared with ${successCount} user${successCount > 1 ? 's' : ''} successfully!`);
+            close();
+        } else {
+            alert(errorMsg || 'Share failed');
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Share Album';
+        }
+    };
 }
 
 function AlbumDetailView() {
@@ -1727,17 +1881,24 @@ function AlbumDetailView() {
             const item = document.createElement('div');
             item.className = 'photo-item';
 
-            // Add Album Button
-            const albumBtn = document.createElement('button');
-            albumBtn.className = 'album-btn';
-            albumBtn.title = 'Add to Album';
-            albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
-            albumBtn.onclick = (e) => {
-                e.stopPropagation();
-                openAddToAlbumModal(photo.id); /**/
-            };
-            item.appendChild(albumBtn);
-            addShareOverlay(item, photo);
+            // Only show action buttons for owned photos (not received/shared photos)
+            // Also hide for all photos in shared albums
+            const isSharedAlbum = state.currentAlbum.album_type === 'shared';
+            if (!photo.is_received && !isSharedAlbum) {
+                // Add Album Button
+                const albumBtn = document.createElement('button');
+                albumBtn.className = 'album-btn';
+                albumBtn.title = 'Add to Album';
+                albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+                albumBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    openAddToAlbumModal(photo.id); /**/
+                };
+                item.appendChild(albumBtn);
+            }
+            if (!isSharedAlbum) {
+                addShareOverlay(item, photo);
+            }
 
             if (photo.type === 'video') {
                 const playIcon = document.createElement('div');
@@ -1892,17 +2053,92 @@ async function fetchMetadata(image) {
     render();
 }
 
+async function fetchSharedPhotos() {
+    state.loading = true;
+    render();
+    try {
+        const res = await fetch(`/api/received-photos?userid=${encodeURIComponent(state.user.userid)}`);
+        const data = await res.json();
+        if (res.ok && data.shared_photos) {
+            state.sharedPhotos = data.shared_photos;
+        }
+    } catch (e) {
+        console.error('Shared photos fetch error', e);
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
+// --- Zoom and Pan Helpers ---
+
+function updateViewerTransform() {
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) {
+        media.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoomLevel / 100})`;
+    }
+}
+
+function handleWheel(e) {
+    if (!state.viewerImage) return;
+    e.preventDefault();
+
+    const delta = Math.sign(e.deltaY) * -1;
+    const step = 10;
+    let newZoom = state.zoomLevel + (delta * step);
+
+    // Clamp zoom
+    if (newZoom < 20) newZoom = 20;
+    if (newZoom > 500) newZoom = 500;
+
+    if (newZoom !== state.zoomLevel) {
+        state.zoomLevel = newZoom;
+        updateZoomUI(newZoom);
+        updateViewerTransform();
+    }
+}
+
+function handleMouseDown(e) {
+    if (!state.viewerImage) return;
+    // Only allow drag if zoomed in or if we want to allow panning nicely
+    if (e.button !== 0) return; // Only left click
+
+    state.isDragging = true;
+    state.dragStartX = e.clientX - state.panX;
+    state.dragStartY = e.clientY - state.panY;
+
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) media.style.cursor = 'grabbing';
+}
+
+function handleMouseMove(e) {
+    if (!state.isDragging || !state.viewerImage) return;
+    e.preventDefault();
+
+    state.panX = e.clientX - state.dragStartX;
+    state.panY = e.clientY - state.dragStartY;
+
+    updateViewerTransform();
+}
+
+function handleMouseUp() {
+    state.isDragging = false;
+    const media = document.querySelector('.lightbox-media img, .lightbox-media video');
+    if (media) media.style.cursor = 'grab';
+}
+
+function updateZoomUI(val) {
+    const zoomValEl = document.getElementById('zoomValue');
+    const rangeInput = document.querySelector('.zoom-slider');
+    if (zoomValEl) zoomValEl.textContent = val + '%';
+    if (rangeInput) rangeInput.value = val;
+}
+
 function MediaViewer() {
     if (!state.viewerImage) {
         currentMetadata = null;
         return document.createTextNode('');
     }
-
-    // Trigger fetch if not loaded yet for this image
-    // simple check: if currentMetadata is null, fetch. 
-    // note: render() is called often, so we need a way to know we are fetching for THIS image.
-    // We can stick the metadata on the state.viewerImage object itself or checking a tracking var.
-    // Let's use a property on state.viewerImage to avoid infinite loops if we used a global without ID check.
 
     if (!state.viewerImage._metaFetched) {
         state.viewerImage._metaFetched = true;
@@ -1913,20 +2149,21 @@ function MediaViewer() {
     el.className = 'lightbox active';
 
     let mediaContent = '';
+    // Ensure we start with transform
+    const transformStyle = `transform: translate(${state.panX}px, ${state.panY}px) scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease`;
+
     if (state.viewerImage.type === 'video') {
-        mediaContent = `<video src="${state.viewerImage.src}" controls autoplay style="max-width:100%; max-height:100%; transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease"></video>`;
+        mediaContent = `<video src="${state.viewerImage.src}" controls autoplay style="max-width:100%; max-height:100%; ${transformStyle}" class="viewer-media"></video>`;
     } else {
-        mediaContent = `<img src="${state.viewerImage.src}" style="transform: scale(${(state.zoomLevel || 100) / 100}); transition: transform 0.1s ease" />`;
+        mediaContent = `<img src="${state.viewerImage.src}" style="${transformStyle}" class="viewer-media" />`;
     }
 
-    // Metadata Sidebar Content
+    // Metadata Sidebar Content (Same as before)
     let metaContent = '';
     if (currentMetadata && currentMetadata.loading) {
         metaContent = '<div class="spinner"></div>';
     } else if (currentMetadata && currentMetadata.found) {
         const m = currentMetadata;
-
-        // Format dates
         const dateTaken = m.date_taken ? new Date(m.date_taken).toLocaleString() : 'Unknown';
         const dateUploaded = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'Unknown';
 
@@ -1970,7 +2207,7 @@ function MediaViewer() {
                 <div class="meta-label">Zoom</div>
                 <div class="meta-value" style="display:flex; align-items:center; gap:10px;">
                     <i class="fa-solid fa-magnifying-glass-minus" style="font-size:12px; color:var(--text-secondary)"></i>
-                    <input type="range" min="20" max="300" value="${state.zoomLevel || 100}" class="zoom-slider" style="flex:1" oninput="updateZoom(this.value)">
+                    <input type="range" min="20" max="500" value="${state.zoomLevel || 100}" class="zoom-slider" style="flex:1" oninput="updateZoomUI(this.value)">
                     <i class="fa-solid fa-magnifying-glass-plus" style="font-size:12px; color:var(--text-secondary)"></i>
                     <span id="zoomValue" style="min-width:40px; text-align:right; font-size:12px; color:var(--text-secondary)">${state.zoomLevel || 100}%</span>
                 </div>
@@ -1982,7 +2219,7 @@ function MediaViewer() {
 
     el.innerHTML = `
         <div class="lightbox-content">
-            <div class="lightbox-media">
+            <div class="lightbox-media" id="mediaContainer">
                  ${mediaContent}
             </div>
             <div class="lightbox-sidebar" onclick="event.stopPropagation()">
@@ -1992,12 +2229,41 @@ function MediaViewer() {
         <div class="close-help">Press ESC to close</div>
     `;
 
+    // Event Listeners for Interaction
+    setTimeout(() => {
+        const container = el.querySelector('#mediaContainer');
+        if (container) {
+            container.addEventListener('wheel', handleWheel, { passive: false });
+            container.addEventListener('mousedown', handleMouseDown);
+            container.addEventListener('mousemove', handleMouseMove);
+            container.addEventListener('mouseup', handleMouseUp);
+            container.addEventListener('mouseleave', handleMouseUp); // Stop drag if leaves
+
+            // Prevent default drag behavior of images
+            const img = container.querySelector('img');
+            if (img) {
+                img.ondragstart = (e) => e.preventDefault();
+                img.style.cursor = 'grab';
+            }
+            const video = container.querySelector('video');
+            if (video) {
+                video.style.cursor = 'grab';
+            }
+        }
+    }, 0);
+
     el.onclick = (e) => {
         // Close if clicking outside the content area (on the background)
+        // Check if we were dragging? If so, don't close.
+        // We can use a small threshold or check isDragging.
+        if (state.isDragging) return;
+
         if (e.target === el || e.target.classList.contains('lightbox-content') || e.target.classList.contains('lightbox-media')) {
             state.viewerImage = null;
             currentMetadata = null;
             state.zoomLevel = 100;
+            state.panX = 0;
+            state.panY = 0;
             render();
         }
     };
@@ -2149,6 +2415,58 @@ function Dashboard() {
     grid.appendChild(sysCard);
 
     container.appendChild(grid);
+
+
+
+    return container;
+}
+
+function SharedView() {
+    const container = document.createElement('div');
+    container.className = 'shared-view';
+
+    const owners = Object.keys(state.sharedPhotos);
+
+    if (owners.length === 0) {
+        container.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos shared with you yet.</div>`;
+        return container;
+    }
+
+    owners.forEach(owner => {
+        const section = document.createElement('div');
+        section.style.marginBottom = '24px';
+
+        const header = document.createElement('h3');
+        header.style.color = 'var(--text-secondary)';
+        header.style.marginBottom = '12px';
+        header.innerHTML = `<i class="fa-solid fa-user-tag"></i> Shared by ${owner}`;
+        section.appendChild(header);
+
+        const grid = document.createElement('div');
+        grid.className = 'photo-grid';
+
+        state.sharedPhotos[owner].forEach(photo => {
+            const item = document.createElement('div');
+            item.className = 'photo-item';
+
+            const img = document.createElement('img');
+            img.src = photo.thumbnail_url;
+            img.loading = "lazy";
+            img.onload = () => img.classList.add('loaded');
+            item.appendChild(img);
+
+            item.onclick = () => {
+                state.viewerImage = { src: photo.image_url, type: photo.type };
+                render();
+            };
+
+            grid.appendChild(item);
+        });
+
+        section.appendChild(grid);
+        container.appendChild(section);
+    });
+
     return container;
 }
 
@@ -2203,6 +2521,8 @@ function ContentArea() {
         el.appendChild(DiscoverView());
     } else if (state.view === 'albums') {
         el.appendChild(AlbumsView());
+    } else if (state.view === 'shared') {
+        el.appendChild(SharedView());
     } else {
         el.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">Coming soon...</div>`;
     }
@@ -2249,6 +2569,8 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.viewerImage) {
         state.viewerImage = null;
         state.zoomLevel = 100;
+        state.panX = 0;
+        state.panY = 0;
         render();
     }
 });

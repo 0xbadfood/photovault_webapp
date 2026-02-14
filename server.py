@@ -1,4 +1,5 @@
 import os
+import hashlib
 import secrets
 import sqlite3
 import database
@@ -10,7 +11,6 @@ from flask import Flask, request, jsonify, send_from_directory, render_template,
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = secrets.token_hex(16)
 
-import hashlib
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '../backup/data'))
@@ -847,11 +847,18 @@ def list_albums():
     
     c.execute("""
         SELECT a.id, a.name, a.description, a.album_type, a.created_at,
-               a.cover_photo_id, p.path as cover_path, p.type as cover_type,
+               a.cover_photo_id, a.owner_email, a.source_album_id,
+               COALESCE(p.path, fp.path) as cover_path,
+               COALESCE(p.type, fp.type) as cover_type,
+               COALESCE(a.cover_photo_id, fp.id) as effective_cover_id,
                COUNT(ap.photo_id) as photo_count
         FROM albums a
         LEFT JOIN album_photos ap ON a.id = ap.album_id
         LEFT JOIN photos p ON a.cover_photo_id = p.id
+        LEFT JOIN album_photos fap ON a.id = fap.album_id AND fap.rowid = (
+            SELECT MIN(rowid) FROM album_photos WHERE album_id = a.id
+        )
+        LEFT JOIN photos fp ON fap.photo_id = fp.id AND a.cover_photo_id IS NULL
         GROUP BY a.id
         ORDER BY a.created_at DESC
     """)
@@ -867,19 +874,33 @@ def list_albums():
             'album_type': r['album_type'],
             'created_at': r['created_at'],
             'photo_count': r['photo_count'],
+            'source_album_id': r['source_album_id'],
+            'owner_email': r['owner_email'],
             'cover_url': None
         }
         
         # Generate cover thumbnail URL if available
-        if r['cover_photo_id'] and r['cover_path']:
+        cover_id = r['effective_cover_id']
+        cover_path = r['cover_path']
+        cover_type = r['cover_type']
+        if cover_id and cover_path:
             try:
-                cover_photo_data = build_photo_response(r['cover_path'], r['cover_photo_id'], r['cover_type'], userid=userid)
+                cover_photo_data = build_photo_response(cover_path, cover_id, cover_type, userid=userid)
                 if cover_photo_data:
                     album['cover_url'] = cover_photo_data['thumbnail_url']
             except Exception:
                 pass
         
         albums.append(album)
+
+        # Check if album contains any received/shared photos
+        c.execute("""
+            SELECT 1 FROM album_photos ap
+            JOIN shared_photos sp ON sp.recipient_photo_id = ap.photo_id
+            WHERE ap.album_id = ? AND sp.recipient_email = ?
+            LIMIT 1
+        """, (r['id'], userid))
+        album['has_shared_photos'] = c.fetchone() is not None
     
     conn.close()
     return jsonify({'albums': albums})
@@ -914,7 +935,7 @@ def create_album():
 
 @app.route('/api/albums/<int:album_id>', methods=['DELETE'])
 def delete_album(album_id):
-    """Delete an album"""
+    """Delete an album. If the album was shared, cascade unshare to recipients."""
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -922,6 +943,87 @@ def delete_album(album_id):
     c = conn.cursor()
     
     try:
+        # Get album info
+        c.execute("SELECT album_type, owner_email, source_album_id FROM albums WHERE id = ?", (album_id,))
+        album = c.fetchone()
+        if not album:
+            conn.close()
+            return jsonify({'error': 'Album not found'}), 404
+
+        # Get all photo IDs in this album
+        c.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (album_id,))
+        album_photo_ids = [row['photo_id'] for row in c.fetchall()]
+
+        if album['album_type'] != 'shared':
+            # Owner is deleting their own album
+            # Find all recipients who have a shared copy of this album
+            # Since we don't track shared albums explicitly in owner DB, we scan all users
+            # to see if they have a copy. This ensures even empty albums are cleaned up.
+            recipients = set()
+            try:
+                u_conn = sqlite3.connect(USER_DB_PATH)
+                u_c = u_conn.cursor()
+                u_c.execute("SELECT email FROM users WHERE email != ? AND status = 'active'", (userid,))
+                recipients = {r[0] for r in u_c.fetchall()}
+                u_conn.close()
+            except Exception as e:
+                print(f"Error fetching user list for cleanup: {e}")
+
+            # For each recipient, find and clean up their shared album copy
+            for recip_email in recipients:
+                try:
+                    recip_conn = database.get_db_connection(recip_email)
+                    rc = recip_conn.cursor()
+                    
+                    # Find albums shared from this source
+                    rc.execute(
+                        "SELECT id FROM albums WHERE source_album_id = ? AND owner_email = ?",
+                        (album_id, userid)
+                    )
+                    shared_albums = rc.fetchall()
+                    
+                    for sa in shared_albums:
+                        shared_album_id = sa['id']
+                        # Get photos in the shared album
+                        rc.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (shared_album_id,))
+                        shared_photo_ids = [r['photo_id'] for r in rc.fetchall()]
+                        
+                        for spid in shared_photo_ids:
+                            # Get photo path to remove symlink
+                            rc.execute("SELECT path FROM photos WHERE id = ?", (spid,))
+                            photo_row = rc.fetchone()
+                            if photo_row:
+                                symlink_path = photo_row['path']
+                                if os.path.islink(symlink_path):
+                                    os.unlink(symlink_path)
+                                
+                                # Remove thumbnail symlink
+                                recip_thumb_dir = get_thumbnail_dir(recip_email)
+                                unique_name = os.path.basename(symlink_path)
+                                recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
+                                recip_thumb_path = os.path.join(recip_thumb_dir, recip_thumb_name)
+                                if os.path.islink(recip_thumb_path):
+                                    os.unlink(recip_thumb_path)
+                            
+                            # Clean up DB records
+                            rc.execute("DELETE FROM photo_people WHERE photo_id = ?", (spid,))
+                            rc.execute("DELETE FROM photos WHERE id = ?", (spid,))
+                            rc.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (spid,))
+                        
+                        # Remove the shared album
+                        rc.execute("DELETE FROM album_photos WHERE album_id = ?", (shared_album_id,))
+                        rc.execute("DELETE FROM albums WHERE id = ?", (shared_album_id,))
+                    
+                    recip_conn.commit()
+                    recip_conn.close()
+                except Exception as e:
+                    print(f"Error cleaning up shared album for {recip_email}: {e}")
+
+            # Also clean up owner's shared_photos records for these photos
+            for pid in album_photo_ids:
+                c.execute("DELETE FROM shared_photos WHERE original_photo_id = ?", (pid,))
+
+        # Delete the album itself
         c.execute("DELETE FROM album_photos WHERE album_id = ?", (album_id,))
         c.execute("DELETE FROM albums WHERE id = ?", (album_id,))
         conn.commit()
@@ -929,6 +1031,8 @@ def delete_album(album_id):
         return jsonify({'success': True})
     except Exception as e:
         conn.close()
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/albums/<int:album_id>/photos', methods=['GET'])
@@ -983,6 +1087,11 @@ def add_photos_to_album(album_id):
     
     added = 0
     for photo_id in photo_ids:
+        # Prevent adding received/shared photos to albums
+        c.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo_id, userid))
+        if c.fetchone():
+            continue
+
         try:
             c.execute(
                 "INSERT INTO album_photos (album_id, photo_id) VALUES (?, ?)",
@@ -1281,6 +1390,43 @@ def list_users():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/received-photos', methods=['GET'])
+def get_received_photos():
+    """Get photos shared with the current user, grouped by sender"""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    conn = database.get_db_connection(userid)
+    c = conn.cursor()
+    
+    try:
+        # Get all received photos from shared_photos table
+        c.execute("""
+            SELECT sp.owner_email, sp.recipient_photo_id, p.path, p.type
+            FROM shared_photos sp
+            JOIN photos p ON sp.recipient_photo_id = p.id
+            ORDER BY sp.owner_email, sp.id DESC
+        """)
+        rows = c.fetchall()
+        
+        grouped = {}
+        for r in rows:
+            owner = r['owner_email']
+            if owner not in grouped:
+                grouped[owner] = []
+            photo_data = build_photo_response(r['path'], r['recipient_photo_id'], r['type'], userid=userid)
+            if photo_data:
+                grouped[owner].append(photo_data)
+        
+        conn.close()
+        return jsonify({'shared_photos': grouped})
+    except Exception as e:
+        conn.close()
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/share', methods=['POST'])
 def share_photo():
     """Share a photo with one or more users"""
@@ -1305,7 +1451,7 @@ def share_photo():
             return jsonify({'error': 'Photo not found'}), 404
         
         # 2. Check this is not a received photo (re-sharing prevention)
-        owner_c.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ?", (photo_id,))
+        owner_c.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo_id, userid))
         if owner_c.fetchone():
             return jsonify({'error': 'Cannot re-share a received photo. Only original owner can share.'}), 403
         
@@ -1622,6 +1768,170 @@ def unshare_received_photo():
         recip_conn.close()
         print(f"Unshare received error: {e}")
         return jsonify({'error': str(e)}), 500
+
+# ================================
+# Album Sharing API Endpoints
+# ================================
+
+
+@app.route('/api/albums/<int:album_id>/share/user', methods=['POST'])
+def share_album_with_user(album_id):
+    """Share an album (copy) with another user using symlinks."""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    recipient_email = data.get('email')
+
+    if not recipient_email:
+        return jsonify({'error': 'Recipient email required'}), 400
+
+    if recipient_email == userid:
+        return jsonify({'error': 'Cannot share with yourself'}), 400
+
+    try:
+        # Verify recipient exists
+        user_conn = sqlite3.connect(USER_DB_PATH)
+        uc = user_conn.cursor()
+        uc.execute("SELECT email FROM users WHERE email = ?", (recipient_email,))
+        if not uc.fetchone():
+            user_conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        user_conn.close()
+
+        # Get source album and photos
+        src_conn = database.get_db_connection(userid)
+        sc = src_conn.cursor()
+        sc.execute("SELECT name, description, album_type FROM albums WHERE id = ?", (album_id,))
+        album_row = sc.fetchone()
+        if not album_row:
+            src_conn.close()
+            return jsonify({'error': 'Album not found'}), 404
+
+        # Block resharing: shared albums cannot be shared again
+        if album_row['album_type'] == 'shared':
+            src_conn.close()
+            return jsonify({'error': 'Cannot reshare a shared album. Only the original owner can share.'}), 403
+
+        album_name = album_row['name']
+        album_desc = album_row['description'] or ''
+
+        sc.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (album_id,))
+        photo_ids = [row['photo_id'] for row in sc.fetchall()]
+
+        # Get photo details
+        photos = []
+        for pid in photo_ids:
+            sc.execute("SELECT * FROM photos WHERE id = ?", (pid,))
+            photo = sc.fetchone()
+            if photo:
+                photos.append(dict(photo))
+
+        # Block resharing: reject if album contains ANY received/shared photos
+        for photo in photos:
+            sc.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo['id'], userid))
+            if sc.fetchone():
+                src_conn.close()
+                return jsonify({'error': 'Cannot share an album that contains shared photos. Only original content can be shared.'}), 403
+
+        # Create album and photos in recipient's DB using symlinks
+        database.init_db(recipient_email)
+        dst_conn = database.get_db_connection(recipient_email)
+        dc = dst_conn.cursor()
+
+        dc.execute(
+            "INSERT INTO albums (name, description, album_type, owner_email, source_album_id) VALUES (?, ?, 'shared', ?, ?)",
+            (f"{album_name} (from {userid})", album_desc, userid, album_id)
+        )
+        new_album_id = dc.lastrowid
+
+        recipient_dir = os.path.join(DATA_DIR, recipient_email)
+        shared_files_dir = os.path.join(recipient_dir, 'shared', 'files')
+        os.makedirs(shared_files_dir, exist_ok=True)
+        recipient_thumb_dir = get_thumbnail_dir(recipient_email)
+        os.makedirs(recipient_thumb_dir, exist_ok=True)
+
+        first_photo_id = None
+
+        for photo in photos:
+            original_path = photo['path']
+            filename = os.path.basename(original_path)
+            unique_name = f"{userid.split('@')[0]}_{filename}"
+            symlink_path = os.path.join(shared_files_dir, unique_name)
+
+            # Create image symlink
+            real_original = os.path.realpath(original_path)
+            if not os.path.exists(symlink_path):
+                os.symlink(real_original, symlink_path)
+
+            # Create thumbnail symlink
+            try:
+                rel_from_data = os.path.relpath(original_path, DATA_DIR)
+                path_parts = rel_from_data.split(os.path.sep)
+                device = path_parts[1]
+                files_idx = original_path.find('/files/')
+                if files_idx != -1:
+                    rel_file = original_path[files_idx+7:]
+                    safe_base = rel_file.replace(os.path.sep, '_')
+                    orig_thumb_name = f"{device}__{safe_base}" if safe_base.lower().endswith('.jpg') else f"{device}__{safe_base}.jpg"
+                    owner_thumb_dir = get_thumbnail_dir(userid)
+                    orig_thumb_path = os.path.join(owner_thumb_dir, orig_thumb_name)
+
+                    recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
+                    recip_thumb_path = os.path.join(recipient_thumb_dir, recip_thumb_name)
+
+                    if os.path.exists(orig_thumb_path) and not os.path.exists(recip_thumb_path):
+                        os.symlink(os.path.realpath(orig_thumb_path), recip_thumb_path)
+            except Exception as e:
+                print(f"Thumbnail symlink error for {filename}: {e}")
+
+            # Insert photo record with symlink path
+            dc.execute("""
+                INSERT OR IGNORE INTO photos
+                (path, description, date_taken, location_lat, location_lon,
+                 processed_for_thumbnails, processed_for_faces, processed_for_description, processed_for_exif, type)
+                VALUES (?, ?, ?, ?, ?, 1, 1, 1, 1, ?)
+            """, (symlink_path, photo.get('description'), photo.get('date_taken'),
+                  photo.get('location_lat'), photo.get('location_lon'), photo.get('type')))
+            new_photo_id = dc.lastrowid
+
+            if first_photo_id is None:
+                first_photo_id = new_photo_id
+
+            dc.execute(
+                "INSERT INTO album_photos (album_id, photo_id) VALUES (?, ?)",
+                (new_album_id, new_photo_id)
+            )
+
+            # Record in shared_photos (recipient's DB) so photos are marked as received
+            dc.execute("""
+                INSERT OR IGNORE INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
+                VALUES (?, ?, ?, ?)
+            """, (photo['id'], userid, recipient_email, new_photo_id))
+
+            # Record in owner's DB
+            sc.execute("""
+                INSERT OR IGNORE INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
+                VALUES (?, ?, ?, ?)
+            """, (photo['id'], userid, recipient_email, new_photo_id))
+
+        # Set cover photo
+        if first_photo_id:
+            dc.execute("UPDATE albums SET cover_photo_id = ? WHERE id = ?", (first_photo_id, new_album_id))
+
+        dst_conn.commit()
+        dst_conn.close()
+        src_conn.commit()
+        src_conn.close()
+
+        return jsonify({'success': True, 'album_id': new_album_id})
+    except Exception as e:
+        print(f"Share album error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
