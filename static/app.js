@@ -18,9 +18,12 @@ const state = {
 
     // Timeline State (for Photos tab)
     timelineGroups: [], // [{ date, count, photos }]
+    photoSearchQuery: '', // Search query for photo descriptions/tags
 
     // People View State
-    people: [], // [{id, name, thumbnail}]
+    people: [], // [{id, name, thumbnail, photo_count}]
+    currentPerson: null, // { id, name, thumbnail } — person detail view
+    personPhotos: [], // Photos for current person detail view
 
     // Search View State
     searchQuery: '',
@@ -142,6 +145,25 @@ async function fetchPeople() {
     }
 }
 
+async function fetchPersonPhotos(personId) {
+    state.loading = true;
+    render();
+    try {
+        const res = await fetch(`/api/people/${personId}/photos`);
+        const data = await res.json();
+        if (data.person) {
+            state.currentPerson = data.person;
+        }
+        state.personPhotos = data.photos || [];
+    } catch (e) {
+        console.error(e);
+        state.personPhotos = [];
+    } finally {
+        state.loading = false;
+        render();
+    }
+}
+
 async function updatePersonName(id, name) {
     try {
         await fetch('/api/people/update', {
@@ -150,6 +172,10 @@ async function updatePersonName(id, name) {
             body: JSON.stringify({ id, name })
         });
         await fetchPeople();
+        // Update currentPerson name if in detail view
+        if (state.currentPerson && state.currentPerson.id === id) {
+            state.currentPerson.name = name;
+        }
         render();
     } catch (e) { console.error(e); }
 }
@@ -163,6 +189,11 @@ async function deletePerson(id, name) {
             body: JSON.stringify({ id })
         });
         if (res.ok) {
+            // If we were viewing this person, go back to grid
+            if (state.currentPerson && state.currentPerson.id === id) {
+                state.currentPerson = null;
+                state.personPhotos = [];
+            }
             await fetchPeople();
             render();
         } else {
@@ -394,6 +425,9 @@ async function fetchTimeline(type) {
         let url = `/api/timeline?userid=${encodeURIComponent(state.user.userid)}`;
         if (type) {
             url += `&type=${encodeURIComponent(type)}`;
+        }
+        if (state.photoSearchQuery) {
+            url += `&search=${encodeURIComponent(state.photoSearchQuery)}`;
         }
         const res = await fetch(url);
         const data = await res.json();
@@ -838,8 +872,7 @@ function Sidebar() {
         { id: 'albums', icon: 'fa-book', label: 'Albums' },
         { id: 'shared', icon: 'fa-share-nodes', label: 'Shared with me' },
         { id: 'people', icon: 'fa-users', label: 'People' },
-        { id: 'discover', icon: 'fa-sparkles', label: 'Discover' },
-        { id: 'search', icon: 'fa-search', label: 'Search' }
+        { id: 'discover', icon: 'fa-sparkles', label: 'Discover' }
     ];
 
     const items = allItems;
@@ -851,9 +884,14 @@ function Sidebar() {
         nav.onclick = () => {
             state.view = item.id;
             localStorage.setItem('activeView', item.id);
+            state.photoSearchQuery = '';
 
             if (item.id === 'albums') {
                 state.currentAlbum = null; // Reset album detail view
+            }
+            if (item.id === 'people') {
+                state.currentPerson = null; // Reset person detail view
+                state.personPhotos = [];
             }
 
             refreshViewData();
@@ -888,66 +926,150 @@ async function logout() {
 }
 
 function PeopleGallery() {
+    const container = document.createElement('div');
+
+    // If viewing a specific person's photos
+    if (state.currentPerson) {
+        container.appendChild(PersonDetailView());
+        return container;
+    }
+
     const grid = document.createElement('div');
     grid.className = 'people-grid';
 
     if (state.people.length === 0) {
         grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No people identified yet. Add photos first!</div>`;
-        return grid;
+        container.appendChild(grid);
+        return container;
     }
 
     state.people.forEach(p => {
-        const item = document.createElement('div');
-        item.className = 'person-item';
+        const card = document.createElement('div');
+        card.className = 'person-card';
 
-        const thumbUrl = p.thumbnail ? `/resource/thumbnail/${state.user.userid}/${p.thumbnail.split('/').pop()}?v=${Date.now()}` : '/static/logo.png';
-        // Need to parse filename from path if it's stored as full path in DB or handle serving
-        // In DB we store "thumbnail_path". If it's absolute, we need just basename for our serving route if using standard route, or fix serving route.
-        // Server route: /resource/thumbnail/<userid>/<filename>
-        // DB stores full path typically or rel path? In daemon we stored full path.
-        // Let's assume we serve by basename for simplicity or refactor server to take full path?
-        // Server takes <filename> inside thumb dir. So we need just the basename.
+        const namePart = p.thumbnail ? (p.thumbnail.split('/').pop()) : '';
+        const finalUrl = namePart ? `/resource/thumbnail/${state.user.userid}/${namePart}` : '';
 
-        const namePart = p.thumbnail ? (p.thumbnail.split('/').pop()) : 'default.jpg';
-        const finalUrl = p.thumbnail ? `/resource/thumbnail/${state.user.userid}/${namePart}` : '';
-
-        item.innerHTML = `
-            <div class="person-avatar">
-                ${finalUrl ? `<img src="${finalUrl}">` : '<i class="fa-solid fa-user"></i>'}
+        card.innerHTML = `
+            ${finalUrl
+                ? `<img class="person-card-img" src="${finalUrl}" loading="lazy">`
+                : `<div class="person-card-placeholder"><i class="fa-solid fa-user"></i></div>`
+            }
+            <div class="person-card-overlay">
+                <span class="person-card-name">${p.name}</span>
+                <span class="person-card-count">${p.photo_count || 0} photo${(p.photo_count || 0) !== 1 ? 's' : ''}</span>
             </div>
             <button class="person-delete-btn" title="Delete Person"><i class="fa-solid fa-trash"></i></button>
-            <div class="person-name" contenteditable="true">${p.name}</div>
         `;
 
         // Delete Handler
-        const delBtn = item.querySelector('.person-delete-btn');
-        if (delBtn) {
-            delBtn.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                deletePerson(p.id, p.name);
-            };
-        }
-
-        // Editable Name
-        const nameEl = item.querySelector('.person-name');
-        nameEl.onblur = () => {
-            const newName = nameEl.innerText.trim();
-            if (newName !== p.name) {
-                updatePersonName(p.id, newName);
-            }
+        const delBtn = card.querySelector('.person-delete-btn');
+        delBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            deletePerson(p.id, p.name);
         };
-        nameEl.onkeypress = (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                nameEl.blur();
-            }
+
+        // Click card to open detail view
+        card.onclick = () => {
+            state.currentPerson = p;
+            fetchPersonPhotos(p.id);
+        };
+
+        grid.appendChild(card);
+    });
+
+    container.appendChild(grid);
+    return container;
+}
+
+function PersonDetailView() {
+    const container = document.createElement('div');
+    container.className = 'person-detail-view';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'person-detail-header';
+
+    const backBtn = document.createElement('button');
+    backBtn.className = 'back-btn';
+    backBtn.innerHTML = '<i class="fa-solid fa-chevron-left"></i> People';
+    backBtn.onclick = () => {
+        state.currentPerson = null;
+        state.personPhotos = [];
+        render();
+    };
+    header.appendChild(backBtn);
+
+    const nameEl = document.createElement('h2');
+    nameEl.className = 'person-detail-name';
+    nameEl.contentEditable = 'true';
+    nameEl.innerText = state.currentPerson.name;
+    nameEl.onblur = () => {
+        const newName = nameEl.innerText.trim();
+        if (newName && newName !== state.currentPerson.name) {
+            updatePersonName(state.currentPerson.id, newName);
+        }
+    };
+    nameEl.onkeypress = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
+    };
+    header.appendChild(nameEl);
+
+    const countBadge = document.createElement('span');
+    countBadge.className = 'person-detail-count';
+    countBadge.innerText = `${state.personPhotos.length} photo${state.personPhotos.length !== 1 ? 's' : ''}`;
+    header.appendChild(countBadge);
+
+    // Delete button in header
+    const delBtn = document.createElement('button');
+    delBtn.className = 'person-detail-delete';
+    delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete Person';
+    delBtn.onclick = () => deletePerson(state.currentPerson.id, state.currentPerson.name);
+    header.appendChild(delBtn);
+
+    container.appendChild(header);
+
+    // Photo Grid
+    const grid = document.createElement('div');
+    grid.className = 'photo-grid';
+
+    if (state.personPhotos.length === 0 && !state.loading) {
+        grid.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos found for this person.</div>`;
+    }
+
+    state.personPhotos.forEach(photo => {
+        const item = document.createElement('div');
+        item.className = 'photo-item';
+
+        // Add Album Button
+        const albumBtn = document.createElement('button');
+        albumBtn.className = 'album-btn';
+        albumBtn.title = 'Add to Album';
+        albumBtn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+        albumBtn.onclick = (e) => {
+            e.stopPropagation();
+            openAddToAlbumModal(photo.id);
+        };
+        item.appendChild(albumBtn);
+        addShareOverlay(item, photo);
+
+        const img = document.createElement('img');
+        img.src = photo.thumbnail_url;
+        img.loading = 'lazy';
+        img.onload = () => img.classList.add('loaded');
+        item.appendChild(img);
+
+        item.onclick = () => {
+            state.viewerImage = { src: photo.image_url, type: photo.type };
+            render();
         };
 
         grid.appendChild(item);
     });
 
-    return grid;
+    container.appendChild(grid);
+    return container;
 }
 
 function SearchInterface() {
@@ -1453,8 +1575,53 @@ function TimelineView() {
     const container = document.createElement('div');
     container.className = 'timeline-view';
 
-    if (state.timelineGroups.length === 0) {
-        container.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">No photos found.</div>`;
+    // Search bar
+    const searchBar = document.createElement('div');
+    searchBar.className = 'photo-search-bar';
+    searchBar.innerHTML = `
+        <i class="fa-solid fa-magnifying-glass photo-search-icon"></i>
+        <input type="text" class="photo-search-input" placeholder='Search your photos' value="${state.photoSearchQuery}">
+        ${state.photoSearchQuery ? '<button class="photo-search-clear"><i class="fa-solid fa-xmark"></i></button>' : ''}
+    `;
+    const searchInput = searchBar.querySelector('.photo-search-input');
+    let searchTimeout;
+    searchInput.addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            state.photoSearchQuery = e.target.value.trim();
+            refreshViewData();
+        }, 400);
+    });
+    searchInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            clearTimeout(searchTimeout);
+            state.photoSearchQuery = searchInput.value.trim();
+            refreshViewData();
+        }
+    });
+    const clearBtn = searchBar.querySelector('.photo-search-clear');
+    if (clearBtn) {
+        clearBtn.onclick = () => {
+            state.photoSearchQuery = '';
+            refreshViewData();
+        };
+    }
+    container.appendChild(searchBar);
+
+    // Retain focus on search input after render
+    requestAnimationFrame(() => {
+        const input = document.querySelector('.photo-search-input');
+        if (input && state.photoSearchQuery) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+        }
+    });
+
+    if (state.timelineGroups.length === 0 && !state.loading) {
+        const msg = document.createElement('div');
+        msg.style.cssText = 'padding:40px 20px; color:var(--text-secondary); text-align:center; font-size:15px;';
+        msg.textContent = state.photoSearchQuery ? `No photos matching "${state.photoSearchQuery}"` : 'No photos found.';
+        container.appendChild(msg);
         return container;
     }
 

@@ -356,9 +356,15 @@ def list_people():
         return jsonify({'error': 'Unauthorized'}), 401
     conn = database.get_db_connection(userid)
     c = conn.cursor()
-    c.execute("SELECT id, name, thumbnail_path FROM people")
+    c.execute("""
+        SELECT p.id, p.name, p.thumbnail_path, COUNT(pp.photo_id) as photo_count
+        FROM people p
+        LEFT JOIN photo_people pp ON p.id = pp.person_id
+        GROUP BY p.id
+        ORDER BY photo_count DESC
+    """)
     rows = c.fetchall()
-    people = [{'id': r['id'], 'name': r['name'], 'thumbnail': r['thumbnail_path']} for r in rows]
+    people = [{'id': r['id'], 'name': r['name'], 'thumbnail': r['thumbnail_path'], 'photo_count': r['photo_count']} for r in rows]
     conn.close()
     return jsonify({'people': people})
 
@@ -376,7 +382,34 @@ def update_person():
     
     conn = database.get_db_connection(userid)
     c = conn.cursor()
+
+    # Get old name to replace in descriptions
+    c.execute("SELECT name FROM people WHERE id = ?", (person_id,))
+    old_row = c.fetchone()
+    old_name = old_row['name'] if old_row else None
+
     c.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
+
+    # Tag all associated photos with the person's name in their description
+    c.execute("SELECT photo_id FROM photo_people WHERE person_id = ?", (person_id,))
+    photo_ids = [r['photo_id'] for r in c.fetchall()]
+    for pid in photo_ids:
+        c.execute("SELECT description FROM photos WHERE id = ?", (pid,))
+        row = c.fetchone()
+        desc = row['description'] if row and row['description'] else ''
+        tags = [t.strip() for t in desc.split(',') if t.strip()]
+
+        # Remove old name tag if present
+        if old_name:
+            tags = [t for t in tags if t.lower() != old_name.lower()]
+
+        # Add new name if not already present
+        if name.lower() not in [t.lower() for t in tags]:
+            tags.append(name)
+
+        new_desc = ', '.join(tags)
+        c.execute("UPDATE photos SET description = ? WHERE id = ?", (new_desc, pid))
+
     conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -406,6 +439,52 @@ def delete_person():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
+
+@app.route('/api/people/<int:person_id>/photos', methods=['GET'])
+def get_person_photos(person_id):
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    conn = database.get_db_connection(userid)
+    c = conn.cursor()
+
+    # Get person info
+    c.execute("SELECT id, name, thumbnail_path FROM people WHERE id = ?", (person_id,))
+    person_row = c.fetchone()
+    if not person_row:
+        conn.close()
+        return jsonify({'error': 'Person not found'}), 404
+
+    # Get all photos for this person
+    c.execute("""
+        SELECT p.id, p.path, p.type, p.date_taken
+        FROM photos p
+        JOIN photo_people pp ON p.id = pp.photo_id
+        WHERE pp.person_id = ?
+        ORDER BY p.date_taken DESC
+    """, (person_id,))
+    rows = c.fetchall()
+
+    photos = []
+    for r in rows:
+        try:
+            photo_data = build_photo_response(r['path'], r['id'], r['type'], userid=userid)
+            if photo_data:
+                photos.append(photo_data)
+        except Exception as e:
+            print(f"Error processing person photo {r['id']}: {e}")
+            continue
+
+    conn.close()
+    return jsonify({
+        'person': {
+            'id': person_row['id'],
+            'name': person_row['name'],
+            'thumbnail': person_row['thumbnail_path']
+        },
+        'photos': photos
+    })
 
 @app.route('/api/search', methods=['POST'])
 def search_photos():
@@ -706,6 +785,7 @@ def get_timeline():
     year = request.args.get('year')
     month = request.args.get('month')
     filter_type = request.args.get('type') # 'photo' | 'screenshot' | 'video'
+    search_query = request.args.get('search', '').strip()
     
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -749,8 +829,9 @@ def get_timeline():
             FROM photos
             WHERE path LIKE ? AND date_taken IS NOT NULL
             {("AND type = 'screenshot'" if filter_type == 'screenshot' else "AND type = 'video'" if filter_type == 'video' else "AND (type IS NULL OR type != 'screenshot' AND type != 'video')" if filter_type == 'photo' else "")}
+            {"AND description LIKE ?" if search_query else ""}
             ORDER BY day DESC
-        """, (f"%{userid}%",))
+        """, (f"%{userid}%",) + ((f"%{search_query}%",) if search_query else ()))
         
         dates = [row['day'] for row in c.fetchall()]
         
@@ -772,10 +853,15 @@ def get_timeline():
                 date_query += " AND type = 'video'"
             elif filter_type == 'photo':
                 date_query += " AND (type IS NULL OR type != 'screenshot' AND type != 'video')"
+
+            date_query_params = [photo_date, f"%{userid}%"]
+            if search_query:
+                date_query += " AND description LIKE ?"
+                date_query_params.append(f"%{search_query}%")
                 
             date_query += " ORDER BY date_taken DESC"
             
-            c.execute(date_query, (photo_date, f"%{userid}%"))
+            c.execute(date_query, date_query_params)
             date_photos = c.fetchall()
             
             for photo in date_photos:
@@ -801,11 +887,16 @@ def get_timeline():
             unknown_query += " AND type = 'video'"
         elif filter_type == 'photo':
             unknown_query += " AND (type IS NULL OR type != 'screenshot' AND type != 'video')"
+
+        unknown_query_params = [f"%{userid}%"]
+        if search_query:
+            unknown_query += " AND description LIKE ?"
+            unknown_query_params.append(f"%{search_query}%")
             
         # Order unknown by timestamp (upload time) or just ID
         unknown_query += " ORDER BY timestamp DESC"
         
-        c.execute(unknown_query, (f"%{userid}%",))
+        c.execute(unknown_query, unknown_query_params)
         unknown_photos = c.fetchall()
         
         if unknown_photos:

@@ -614,58 +614,85 @@ body {
     }
 }
 
-/* People Grid */
+/* People Grid — Google Photos Style */
 .people-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
 }
 
-.person-item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    transition: transform 0.2s;
-    cursor: pointer;
+.person-card {
     position: relative;
-    padding-top: 10px;
-    /* Add some padding for the button if needed, or rely on absolute positioning */
-}
-
-.person-item:hover {
-    transform: translateY(-5px);
-}
-
-.person-avatar {
-    width: 100px;
-    height: 100px;
-    border-radius: 50%;
-    background: #333;
+    aspect-ratio: 3 / 4;
+    border-radius: 12px;
     overflow: hidden;
-    /* Clips content inside avatar */
-    margin-bottom: 10px;
+    cursor: pointer;
+    background: #222;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.person-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.person-card-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.person-card-placeholder {
+    width: 100%;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
-    position: relative;
-    /* Keep this for future overlays inside */
-    transition: box-shadow 0.2s;
+    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
 }
 
-.person-item:hover .person-avatar {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+.person-card-placeholder i {
+    font-size: 56px;
+    color: var(--text-secondary);
+}
+
+.person-card-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 40px 12px 12px 12px;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.person-card-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.person-card-count {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.7);
 }
 
 .person-delete-btn {
     position: absolute;
-    top: 0;
-    right: 0;
+    top: 8px;
+    right: 8px;
     background: rgba(255, 59, 48, 0.9);
     color: white;
     border: none;
     border-radius: 50%;
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -674,7 +701,6 @@ body {
     opacity: 0;
     z-index: 20;
     transition: opacity 0.2s, transform 0.2s;
-    /* Ensure it's clickable */
     pointer-events: auto;
 }
 
@@ -683,35 +709,62 @@ body {
     background: #d70015;
 }
 
-.person-item:hover .person-delete-btn {
+.person-card:hover .person-delete-btn {
     opacity: 1;
 }
 
-.person-avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+/* Person Detail View */
+.person-detail-view {
+    display: flex;
+    flex-direction: column;
 }
 
-.person-avatar i {
-    font-size: 40px;
-    color: var(--text-secondary);
+.person-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
 }
 
-.person-name {
-    text-align: center;
-    font-weight: 500;
+.person-detail-name {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0;
     padding: 4px 8px;
-    border-radius: 4px;
-    width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    border-radius: 6px;
+    outline: none;
+    transition: background 0.2s;
+    cursor: text;
 }
 
-.person-name:focus {
-    background: #333;
-    outline: none;
+.person-detail-name:focus {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.person-detail-count {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-left: auto;
+}
+
+.person-detail-delete {
+    background: rgba(255, 59, 48, 0.15);
+    color: #ff3b30;
+    border: 1px solid rgba(255, 59, 48, 0.3);
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+}
+
+.person-detail-delete:hover {
+    background: rgba(255, 59, 48, 0.25);
+    border-color: #ff3b30;
 }
 
 /* Search Interface */
@@ -788,6 +841,62 @@ search-box-row button {
 }
 
 /* Timeline View */
+/* Photo Search Bar */
+.photo-search-bar {
+    display: flex;
+    align-items: center;
+    background: #2a2a2e;
+    border-radius: 24px;
+    padding: 0 16px;
+    margin-bottom: 20px;
+    transition: background 0.2s, box-shadow 0.2s;
+    position: relative;
+}
+
+.photo-search-bar:focus-within {
+    background: #333338;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+.photo-search-icon {
+    color: var(--text-secondary);
+    font-size: 15px;
+    flex-shrink: 0;
+}
+
+.photo-search-input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 15px;
+    padding: 12px;
+    font-family: inherit;
+}
+
+.photo-search-input::placeholder {
+    color: var(--text-secondary);
+}
+
+.photo-search-clear {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.2s, background 0.2s;
+}
+
+.photo-search-clear:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+}
+
 .timeline-view {
     display: flex;
     flex-direction: column;
