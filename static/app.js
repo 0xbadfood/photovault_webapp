@@ -42,7 +42,9 @@ const state = {
 
     loading: false,
     viewerImage: null, // { src: string } or null
-    savedScrollPosition: 0, // Saved scroll position for restoring after viewer close
+    viewerList: [], // Array of media items for navigation
+    viewerIndex: -1, // Current index in viewerList
+    savedScrollPosition: 0, // Saved scroll position for restore after viewer close
     videoVolume: 1.0,
     zoomLevel: 100, // %
     panX: 0,
@@ -1061,6 +1063,8 @@ function PersonDetailView() {
         item.appendChild(img);
 
         item.onclick = () => {
+            state.viewerList = state.personPhotos;
+            state.viewerIndex = state.personPhotos.findIndex(p => p.id === photo.id);
             state.viewerImage = { src: photo.image_url, type: photo.type };
             render();
         };
@@ -1160,6 +1164,8 @@ function SearchInterface() {
             item.appendChild(img);
 
             item.onclick = () => {
+                state.viewerList = state.searchResults;
+                state.viewerIndex = state.searchResults.findIndex(p => p.id === r.id);
                 state.viewerImage = { src: r.image_url, type: r.type };
                 render();
             };
@@ -1487,6 +1493,27 @@ function FileExplorer() {
                     const contentArea = document.querySelector('.content-area');
                     if (contentArea) state.savedScrollPosition = contentArea.scrollTop;
 
+                    // Build viewer list from current folder
+                    const validItems = state.explorerItems.filter(i => i.type !== 'dir').map(i => {
+                        const p = parseImagePath(state.currentPath, i.name);
+                        if (!p) return null;
+                        const lowerName = i.name.toLowerCase();
+                        const isVideo = lowerName.match(/\.(mp4|mov|avi|mkv|webm)$/);
+                        const isImage = lowerName.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)$/);
+
+                        if (!isVideo && !isImage) return null;
+
+                        return {
+                            src: p.url,
+                            type: isVideo ? 'video' : 'image',
+                            path: p.path,
+                            name: i.name
+                        };
+                    }).filter(i => i !== null);
+
+                    state.viewerList = validItems;
+                    state.viewerIndex = validItems.findIndex(i => i.name === item.name);
+
                     // Detect if video
                     const isVideo = item.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
                     state.viewerImage = {
@@ -1703,6 +1730,12 @@ function TimelineView() {
                 if (contentArea) {
                     state.savedScrollPosition = contentArea.scrollTop;
                 }
+
+                // Flatten timeline groups for viewer list
+                const allPhotos = state.timelineGroups.flatMap(g => g.photos);
+                state.viewerList = allPhotos;
+                state.viewerIndex = allPhotos.findIndex(p => p.id === photo.id);
+
                 state.viewerImage = { src: photo.image_url, type: photo.type };
                 render();
             };
@@ -1770,6 +1803,8 @@ function DiscoverView() {
             item.appendChild(img);
 
             item.onclick = () => {
+                state.viewerList = memory.photos;
+                state.viewerIndex = memory.photos.findIndex(p => p.id === photo.id);
                 state.viewerImage = { src: photo.image_url, type: photo.type };
                 render();
             };
@@ -2085,6 +2120,8 @@ function AlbumDetailView() {
                 const contentArea = document.querySelector('.content-area');
                 if (contentArea) state.savedScrollPosition = contentArea.scrollTop;
 
+                state.viewerList = state.currentAlbum.photos;
+                state.viewerIndex = state.currentAlbum.photos.findIndex(p => p.id === photo.id);
                 state.viewerImage = { src: photo.image_url, type: photo.type };
                 render();
             };
@@ -2384,10 +2421,21 @@ function MediaViewer() {
         metaContent = `<div style="color:var(--text-secondary); padding-top:20px; text-align:center;">No metadata available</div>`;
     }
 
+
+    // Navigation Arrows
+    let navControls = '';
+    if (state.viewerList.length > 1) {
+        navControls = `
+            <button class="nav-arrow left" id="navLeft"><i class="fa-solid fa-chevron-left"></i></button>
+            <button class="nav-arrow right" id="navRight"><i class="fa-solid fa-chevron-right"></i></button>
+        `;
+    }
+
     el.innerHTML = `
         <div class="lightbox-content">
             <div class="lightbox-media" id="mediaContainer">
                  ${mediaContent}
+                 ${navControls}
             </div>
             <div class="lightbox-sidebar" onclick="event.stopPropagation()">
                 ${metaContent}
@@ -2416,6 +2464,23 @@ function MediaViewer() {
             if (video) {
                 video.style.cursor = 'grab';
             }
+
+            // Navigation Listeners
+            const leftBtn = el.querySelector('#navLeft');
+            const rightBtn = el.querySelector('#navRight');
+
+            if (leftBtn) {
+                leftBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    navigateViewer(-1);
+                };
+            }
+            if (rightBtn) {
+                rightBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    navigateViewer(1);
+                };
+            }
         }
     }, 0);
 
@@ -2427,6 +2492,8 @@ function MediaViewer() {
 
         if (e.target === el || e.target.classList.contains('lightbox-content') || e.target.classList.contains('lightbox-media')) {
             state.viewerImage = null;
+            state.viewerList = [];
+            state.viewerIndex = -1;
             currentMetadata = null;
             state.zoomLevel = 100;
             state.panX = 0;
@@ -2436,6 +2503,36 @@ function MediaViewer() {
     };
 
     return el;
+}
+
+function navigateViewer(direction) {
+    if (!state.viewerList || state.viewerList.length <= 1) return;
+
+    let newIndex = state.viewerIndex + direction;
+
+    // Bounds check (looping could be an option, but let's stick to bounds for now)
+    if (newIndex < 0) return; // or newIndex = state.viewerList.length - 1; (loop)
+    if (newIndex >= state.viewerList.length) return; // or newIndex = 0; (loop)
+
+    state.viewerIndex = newIndex;
+    const nextItem = state.viewerList[newIndex];
+
+    // Normalize item to viewerImage format
+    const src = nextItem.src || nextItem.image_url;
+
+    state.viewerImage = {
+        src: src,
+        type: nextItem.type,
+        ...nextItem
+    };
+
+    // Reset Zoom/Pan
+    state.zoomLevel = 100;
+    state.panX = 0;
+    state.panY = 0;
+    currentMetadata = null; // Clear old metadata
+
+    render();
 }
 
 function Dashboard() {
@@ -2473,7 +2570,7 @@ function Dashboard() {
     // 1. Storage Card (Wide)
     const storageCard = document.createElement('div');
     storageCard.className = 'dash-card wide';
-    const usedGB = (storage.used_bytes / (1024 * 1024 * 1024)).toFixed(2);
+    const usedGB = ((storage.used_bytes || 0) / (1024 * 1024 * 1024)).toFixed(2);
     const totalGB = sys.disk_total ? (sys.disk_total / (1024 * 1024 * 1024)).toFixed(0) : '?';
     const percent = sys.disk_percent || 0;
 
@@ -2623,6 +2720,8 @@ function SharedView() {
             item.appendChild(img);
 
             item.onclick = () => {
+                state.viewerList = state.sharedPhotos[owner];
+                state.viewerIndex = state.sharedPhotos[owner].findIndex(p => p.id === photo.id);
                 state.viewerImage = { src: photo.image_url, type: photo.type };
                 render();
             };

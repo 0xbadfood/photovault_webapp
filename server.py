@@ -317,7 +317,8 @@ def get_dashboard_stats():
             import psutil
             import platform
             
-            disk = psutil.disk_usage(DATA_DIR)
+            disk_path = DATA_DIR if os.path.exists(DATA_DIR) else '/'
+            disk = psutil.disk_usage(disk_path)
             stats['system']['disk_total'] = disk.total
             stats['system']['disk_used'] = disk.used
             stats['system']['disk_free'] = disk.free
