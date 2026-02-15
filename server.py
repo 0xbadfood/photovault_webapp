@@ -15,6 +15,69 @@ app.secret_key = secrets.token_hex(16)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '../backup/data'))
 USER_DB_PATH = os.path.abspath(os.path.join(BASE_DIR, '../backup/user.sql'))
+GUEST_DB_PATH = os.path.abspath(os.path.join(BASE_DIR, '../backup/guest.sql'))
+
+def init_guest_db():
+    """Create guest.sql tables if they don't exist."""
+    conn = sqlite3.connect(GUEST_DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS guests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        host_count INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_login DATETIME
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS guest_hosts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guest_id INTEGER NOT NULL,
+        host_email TEXT NOT NULL,
+        added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_activated_date DATETIME,
+        access_till DATETIME NOT NULL,
+        status TEXT DEFAULT 'active',
+        FOREIGN KEY(guest_id) REFERENCES guests(id),
+        UNIQUE(guest_id, host_email)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS guest_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guest_id INTEGER NOT NULL,
+        host_email TEXT NOT NULL,
+        asset_type TEXT NOT NULL,
+        asset_id INTEGER NOT NULL,
+        guest_asset_id INTEGER,
+        shared_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(guest_id) REFERENCES guests(id)
+    )''')
+    conn.commit()
+    conn.close()
+
+# Initialize guest DB on startup
+init_guest_db()
+
+def get_guest_db():
+    """Get a connection to guest.sql with WAL mode."""
+    conn = sqlite3.connect(GUEST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=5000')
+    return conn
+
+def is_guest_user(email):
+    """Check if the given email belongs to a guest rather than a full user."""
+    if not email:
+        return False
+    try:
+        conn = get_guest_db()
+        c = conn.cursor()
+        c.execute('SELECT id FROM guests WHERE email = ?', (email,))
+        result = c.fetchone() is not None
+        conn.close()
+        return result
+    except Exception:
+        return False
 
 def get_user_dir(userid):
     return os.path.join(DATA_DIR, userid)
@@ -38,51 +101,82 @@ def login():
         return jsonify({'error': 'User ID and password required'}), 400
 
     try:
+        # --- Step 1: Check user.sql ---
         conn = sqlite3.connect(USER_DB_PATH)
         c = conn.cursor()
-        
-        # Check if user exists
-        # Schema: id, email, password_hash, salt, unique_id, is_admin, status, created_at
         c.execute("SELECT password_hash, salt, status, is_admin FROM users WHERE email = ?", (userid,))
         row = c.fetchone()
+        conn.close()
         
         if row:
             stored_hash, salt, status, is_admin = row
-            
-            # Verify basic status
             if status != 'active':
                 return jsonify({'error': 'Account is not active'}), 403
-            
-            # Hash provided password with stored salt
-            # Logic from cr.py: hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
             calc_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-            
             if calc_hash == stored_hash:
                 resp = make_response(jsonify({
                     'success': True, 
                     'userid': userid,
-                    'is_admin': bool(is_admin)
+                    'is_admin': bool(is_admin),
+                    'role': 'user'
                 }))
-                # Set cookie for 12 hours
                 resp.set_cookie('userid', userid, max_age=12 * 60 * 60)
+                resp.set_cookie('role', 'user', max_age=12 * 60 * 60)
                 return resp
             else:
                 return jsonify({'error': 'Invalid password'}), 401
-        else:
-             return jsonify({'error': 'User not found'}), 404
+        
+        # --- Step 2: Check guest.sql ---
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        gc.execute("SELECT id, password_hash, password_salt FROM guests WHERE email = ?", (userid,))
+        guest_row = gc.fetchone()
+        
+        if guest_row:
+            guest_id = guest_row['id']
+            calc_hash = hashlib.sha256(f"{password}{guest_row['password_salt']}".encode()).hexdigest()
+            if calc_hash != guest_row['password_hash']:
+                gconn.close()
+                return jsonify({'error': 'Invalid password'}), 401
+            
+            # Check if any host relationship is active and not expired
+            gc.execute("""SELECT host_email FROM guest_hosts 
+                          WHERE guest_id = ? AND status = 'active' AND access_till >= datetime('now')""", (guest_id,))
+            active_hosts = [r['host_email'] for r in gc.fetchall()]
+            
+            if not active_hosts:
+                gconn.close()
+                return jsonify({'error': 'Guest access has expired or been revoked'}), 403
+            
+            # Update last_login
+            gc.execute("UPDATE guests SET last_login = datetime('now') WHERE id = ?", (guest_id,))
+            gconn.commit()
+            gconn.close()
+            
+            resp = make_response(jsonify({
+                'success': True,
+                'userid': userid,
+                'is_admin': False,
+                'role': 'guest',
+                'hosts': active_hosts
+            }))
+            resp.set_cookie('userid', userid, max_age=12 * 60 * 60)
+            resp.set_cookie('role', 'guest', max_age=12 * 60 * 60)
+            return resp
+        
+        gconn.close()
+        return jsonify({'error': 'User not found'}), 404
              
     except Exception as e:
         print(f"Auth Error: {e}")
         return jsonify({'error': 'Authentication failed due to server error'}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 @app.route('/api/auth/check', methods=['GET'])
 def check_auth():
     userid = request.cookies.get('userid')
+    role = request.cookies.get('role', 'user')
     if userid:
-        return jsonify({'authenticated': True, 'userid': userid})
+        return jsonify({'authenticated': True, 'userid': userid, 'role': role})
     return jsonify({'authenticated': False}), 401
 
 @app.route('/api/logout', methods=['POST'])
@@ -1466,18 +1560,35 @@ def build_photo_response(abs_path, photo_id, media_type=None, userid=None):
 
 @app.route('/api/users/list', methods=['GET'])
 def list_users():
-    """List all users from user.sql for the share picker"""
+    """List all users + active guests of current user for the share picker"""
     current_user = get_current_userid()
     if not current_user:
         return jsonify({'error': 'Unauthorized'}), 401
     
     try:
+        # Regular users
         conn = sqlite3.connect(USER_DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute("SELECT email, status FROM users WHERE email != ? AND status = 'active'", (current_user,))
-        users = [{'email': r['email']} for r in c.fetchall()]
+        users = [{'email': r['email'], 'type': 'user'} for r in c.fetchall()]
         conn.close()
+        
+        # Active guests of current user (only if current user is not a guest)
+        if not is_guest_user(current_user):
+            try:
+                gconn = get_guest_db()
+                gc = gconn.cursor()
+                gc.execute("""SELECT g.email FROM guests g
+                              JOIN guest_hosts gh ON g.id = gh.guest_id
+                              WHERE gh.host_email = ? AND gh.status = 'active'
+                              AND gh.access_till >= datetime('now')""", (current_user,))
+                for r in gc.fetchall():
+                    users.append({'email': r['email'], 'type': 'guest'})
+                gconn.close()
+            except Exception as e:
+                print(f"Error loading guests for share picker: {e}")
+        
         return jsonify({'users': users})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1883,14 +1994,29 @@ def share_album_with_user(album_id):
         return jsonify({'error': 'Cannot share with yourself'}), 400
 
     try:
-        # Verify recipient exists
+        # Verify recipient exists (check users first, then guests)
+        recipient_found = False
         user_conn = sqlite3.connect(USER_DB_PATH)
         uc = user_conn.cursor()
         uc.execute("SELECT email FROM users WHERE email = ?", (recipient_email,))
-        if not uc.fetchone():
-            user_conn.close()
-            return jsonify({'error': 'User not found'}), 404
+        if uc.fetchone():
+            recipient_found = True
         user_conn.close()
+        
+        if not recipient_found:
+            # Check if recipient is a guest invited by this user
+            gconn = get_guest_db()
+            gc = gconn.cursor()
+            gc.execute("""SELECT g.id FROM guests g
+                          JOIN guest_hosts gh ON g.id = gh.guest_id
+                          WHERE g.email = ? AND gh.host_email = ? AND gh.status = 'active'""",
+                       (recipient_email, userid))
+            if gc.fetchone():
+                recipient_found = True
+            gconn.close()
+        
+        if not recipient_found:
+            return jsonify({'error': 'User not found'}), 404
 
         # Get source album and photos
         src_conn = database.get_db_connection(userid)
@@ -2022,6 +2148,296 @@ def share_album_with_user(album_id):
         print(f"Share album error: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ================================
+# Guest Management API Endpoints
+# ================================
+
+def require_not_guest():
+    """Check that current user is NOT a guest. Returns error response or None."""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if is_guest_user(userid):
+        return jsonify({'error': 'Guests cannot perform this action'}), 403
+    return None
+
+@app.route('/api/guests/list', methods=['GET'])
+def list_guests():
+    """List current user's invited guests with status."""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    block = require_not_guest()
+    if block: return block
+    
+    try:
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        gc.execute("""SELECT g.id, g.email, g.host_count, g.created_at, g.last_login,
+                             gh.added_date, gh.last_activated_date, gh.access_till, gh.status
+                      FROM guests g
+                      JOIN guest_hosts gh ON g.id = gh.guest_id
+                      WHERE gh.host_email = ?
+                      ORDER BY gh.added_date DESC""", (userid,))
+        guests = []
+        for r in gc.fetchall():
+            # Check if expired
+            status = r['status']
+            if status == 'active':
+                gc.execute("SELECT 1 WHERE datetime(?) < datetime('now')", (r['access_till'],))
+                if gc.fetchone():
+                    status = 'expired'
+            guests.append({
+                'id': r['id'],
+                'email': r['email'],
+                'host_count': r['host_count'],
+                'added_date': r['added_date'],
+                'last_login': r['last_login'],
+                'access_till': r['access_till'],
+                'status': status
+            })
+        gconn.close()
+        return jsonify({'guests': guests})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/guests/invite', methods=['POST'])
+def invite_guest():
+    """Invite a new guest. Body: {email, password, duration_days}"""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    block = require_not_guest()
+    if block: return block
+    
+    data = request.json
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+    duration_days = int(data.get('duration_days', 30))
+    
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+    if duration_days < 1 or duration_days > 365:
+        return jsonify({'error': 'Duration must be 1-365 days'}), 400
+    
+    # Don't allow inviting an existing Photovault user as guest
+    try:
+        uconn = sqlite3.connect(USER_DB_PATH)
+        uc = uconn.cursor()
+        uc.execute("SELECT email FROM users WHERE email = ?", (email,))
+        if uc.fetchone():
+            uconn.close()
+            return jsonify({'error': 'This email belongs to a Photovault user, not a guest'}), 400
+        uconn.close()
+    except Exception:
+        pass
+    
+    salt = secrets.token_hex(16)
+    password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+    
+    try:
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        
+        # Check if guest email already exists
+        gc.execute("SELECT id, password_hash, password_salt FROM guests WHERE email = ?", (email,))
+        existing = gc.fetchone()
+        
+        if existing:
+            guest_id = existing['id']
+            # Check if this host already invited this guest
+            gc.execute("SELECT id FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
+            if gc.fetchone():
+                gconn.close()
+                return jsonify({'error': 'Guest already invited by you'}), 400
+            
+            # Add new host relationship, increment counter
+            gc.execute("""INSERT INTO guest_hosts (guest_id, host_email, access_till, last_activated_date)
+                          VALUES (?, ?, datetime('now', '+' || ? || ' days'), datetime('now'))""",
+                       (guest_id, userid, duration_days))
+            gc.execute("UPDATE guests SET host_count = host_count + 1 WHERE id = ?", (guest_id,))
+        else:
+            # Create new guest
+            gc.execute("""INSERT INTO guests (email, password_hash, password_salt, host_count)
+                          VALUES (?, ?, ?, 1)""", (email, password_hash, salt))
+            guest_id = gc.lastrowid
+            gc.execute("""INSERT INTO guest_hosts (guest_id, host_email, access_till, last_activated_date)
+                          VALUES (?, ?, datetime('now', '+' || ? || ' days'), datetime('now'))""",
+                       (guest_id, userid, duration_days))
+        
+        # Initialize guest's per-user data directory and DB
+        database.init_db(email)
+        
+        gconn.commit()
+        gconn.close()
+        return jsonify({'success': True, 'guest_id': guest_id})
+    except Exception as e:
+        print(f"Invite guest error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/guests/delete', methods=['POST'])
+def delete_guest():
+    """Remove a guest invitation. Decrements counter, deletes at 0."""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    block = require_not_guest()
+    if block: return block
+    
+    data = request.json
+    guest_email = data.get('email', '').strip().lower()
+    if not guest_email:
+        return jsonify({'error': 'Guest email required'}), 400
+    
+    try:
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        
+        gc.execute("SELECT id, host_count FROM guests WHERE email = ?", (guest_email,))
+        guest = gc.fetchone()
+        if not guest:
+            gconn.close()
+            return jsonify({'error': 'Guest not found'}), 404
+        
+        guest_id = guest['id']
+        
+        # Verify this host has a relationship
+        gc.execute("SELECT id FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
+        if not gc.fetchone():
+            gconn.close()
+            return jsonify({'error': 'Guest not invited by you'}), 404
+        
+        # Clean up shared assets for this host
+        gc.execute("""SELECT asset_type, guest_asset_id FROM guest_assets 
+                      WHERE guest_id = ? AND host_email = ?""", (guest_id, userid))
+        assets = gc.fetchall()
+        
+        if assets:
+            # Remove symlinks and DB records from guest's per-user DB
+            try:
+                guest_conn = database.get_db_connection(guest_email)
+                guest_c = guest_conn.cursor()
+                for asset in assets:
+                    if asset['asset_type'] == 'photo' and asset['guest_asset_id']:
+                        # Get path and remove symlinks
+                        guest_c.execute("SELECT path FROM photos WHERE id = ?", (asset['guest_asset_id'],))
+                        photo = guest_c.fetchone()
+                        if photo and os.path.islink(photo['path']):
+                            os.unlink(photo['path'])
+                        guest_c.execute("DELETE FROM photo_people WHERE photo_id = ?", (asset['guest_asset_id'],))
+                        guest_c.execute("DELETE FROM photos WHERE id = ?", (asset['guest_asset_id'],))
+                        guest_c.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (asset['guest_asset_id'],))
+                    elif asset['asset_type'] == 'album' and asset['guest_asset_id']:
+                        guest_c.execute("DELETE FROM album_photos WHERE album_id = ?", (asset['guest_asset_id'],))
+                        guest_c.execute("DELETE FROM albums WHERE id = ?", (asset['guest_asset_id'],))
+                guest_conn.commit()
+                guest_conn.close()
+            except Exception as e:
+                print(f"Error cleaning guest assets: {e}")
+        
+        # Remove guest_assets and guest_hosts for this host
+        gc.execute("DELETE FROM guest_assets WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
+        gc.execute("DELETE FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
+        
+        # Decrement counter
+        new_count = guest['host_count'] - 1
+        if new_count <= 0:
+            # No more hosts — delete guest entirely
+            gc.execute("DELETE FROM guest_assets WHERE guest_id = ?", (guest_id,))
+            gc.execute("DELETE FROM guest_hosts WHERE guest_id = ?", (guest_id,))
+            gc.execute("DELETE FROM guests WHERE id = ?", (guest_id,))
+            # Optionally remove guest's data directory
+            guest_dir = get_user_dir(guest_email)
+            if os.path.exists(guest_dir):
+                import shutil
+                shutil.rmtree(guest_dir, ignore_errors=True)
+        else:
+            gc.execute("UPDATE guests SET host_count = ? WHERE id = ?", (new_count, guest_id))
+        
+        gconn.commit()
+        gconn.close()
+        return jsonify({'success': True, 'remaining_hosts': max(new_count, 0)})
+    except Exception as e:
+        print(f"Delete guest error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/guests/revoke', methods=['POST'])
+def revoke_guest():
+    """Set guest status to inactive for current host."""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    block = require_not_guest()
+    if block: return block
+    
+    data = request.json
+    guest_email = data.get('email', '').strip().lower()
+    if not guest_email:
+        return jsonify({'error': 'Guest email required'}), 400
+    
+    try:
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        gc.execute("SELECT id FROM guests WHERE email = ?", (guest_email,))
+        guest = gc.fetchone()
+        if not guest:
+            gconn.close()
+            return jsonify({'error': 'Guest not found'}), 404
+        
+        gc.execute("""UPDATE guest_hosts SET status = 'inactive' 
+                      WHERE guest_id = ? AND host_email = ?""", (guest['id'], userid))
+        if gc.rowcount == 0:
+            gconn.close()
+            return jsonify({'error': 'Guest not invited by you'}), 404
+        
+        gconn.commit()
+        gconn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/guests/reactivate', methods=['POST'])
+def reactivate_guest():
+    """Reactivate a guest with new duration. Body: {email, duration_days}"""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    block = require_not_guest()
+    if block: return block
+    
+    data = request.json
+    guest_email = data.get('email', '').strip().lower()
+    duration_days = int(data.get('duration_days', 30))
+    if not guest_email:
+        return jsonify({'error': 'Guest email required'}), 400
+    if duration_days < 1 or duration_days > 365:
+        return jsonify({'error': 'Duration must be 1-365 days'}), 400
+    
+    try:
+        gconn = get_guest_db()
+        gc = gconn.cursor()
+        gc.execute("SELECT id FROM guests WHERE email = ?", (guest_email,))
+        guest = gc.fetchone()
+        if not guest:
+            gconn.close()
+            return jsonify({'error': 'Guest not found'}), 404
+        
+        gc.execute("""UPDATE guest_hosts SET status = 'active',
+                      access_till = datetime('now', '+' || ? || ' days'),
+                      last_activated_date = datetime('now')
+                      WHERE guest_id = ? AND host_email = ?""",
+                   (duration_days, guest['id'], userid))
+        if gc.rowcount == 0:
+            gconn.close()
+            return jsonify({'error': 'Guest not invited by you'}), 404
+        
+        gconn.commit()
+        gconn.close()
+        return jsonify({'success': True})
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 

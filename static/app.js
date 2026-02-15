@@ -69,8 +69,8 @@ async function login(userid, password) {
         });
         const data = await res.json();
         if (res.ok) {
-            state.user = { userid: data.userid };
-            state.view = 'dashboard'; // Force dashboard as landing page
+            state.user = { userid: data.userid, role: data.role || 'user', hosts: data.hosts || [] };
+            state.view = data.role === 'guest' ? 'photos' : 'dashboard';
             render(); // Render immediately
 
             // Initialize views in background
@@ -208,6 +208,8 @@ async function deletePerson(id, name) {
 // --- Sharing Functions ---
 
 function addShareOverlay(item, photo) {
+    // Guests cannot share
+    if (state.user && state.user.role === 'guest') return;
     if (photo.is_received) {
         // Received photo: show "Shared" badge always + unshare btn on hover
         const badge = document.createElement('div');
@@ -304,7 +306,7 @@ function openShareModal(photoId, alreadySharedWith) {
 
                 item.innerHTML = `
                     <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
-                    <div class="user-email">${user.email}${isAlreadyShared ? ' <span style="color:#34c759;font-size:11px;">(already shared)</span>' : ''}</div>
+                    <div class="user-email">${user.email}${user.type === 'guest' ? ' <span style="color:#a78bfa;font-size:11px;">(Guest)</span>' : ''}${isAlreadyShared ? ' <span style="color:#34c759;font-size:11px;">(already shared)</span>' : ''}</div>
                     <div class="user-check"><i class="fa-solid fa-check"></i></div>
                 `;
 
@@ -874,7 +876,12 @@ function Sidebar() {
         { id: 'discover', icon: 'fa-sparkles', label: 'Discover' }
     ];
 
-    const items = allItems;
+    let items = allItems;
+    // Guests: only show photos, screenshots, videos, albums
+    if (state.user && state.user.role === 'guest') {
+        const guestTabs = ['photos', 'screenshots', 'videos', 'albums'];
+        items = allItems.filter(i => guestTabs.includes(i.id));
+    }
 
     items.forEach(item => {
         const nav = document.createElement('div');
@@ -2681,6 +2688,32 @@ function Dashboard() {
     `;
     grid.appendChild(sysCard);
 
+    // 5. Guest Management Card (users only, after system health)
+    if (!state.user || state.user.role !== 'guest') {
+        const guestCard = document.createElement('div');
+        guestCard.className = 'dash-card wide';
+        guestCard.innerHTML = `
+            <div class="card-header"><i class="fa-solid fa-user-plus"></i> Guest Management</div>
+            <div id="guestCardBody" style="min-height: 60px;">
+                <div style="text-align:center; color:var(--text-secondary); padding:10px;">Loading guests...</div>
+            </div>
+            <div style="margin-top: 14px;">
+                <button id="inviteGuestBtn" style="
+                    background: linear-gradient(135deg, #6c8cff 0%, #a78bfa 100%);
+                    color: #fff; border: none; border-radius: 8px; padding: 10px 20px;
+                    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+                    transition: opacity 0.2s;
+                " onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'"
+                ><i class="fa-solid fa-plus"></i> Invite Guest</button>
+            </div>
+        `;
+        grid.appendChild(guestCard);
+
+        // Load guest list asynchronously
+        setTimeout(() => loadGuestList(guestCard.querySelector('#guestCardBody')), 0);
+        guestCard.querySelector('#inviteGuestBtn').onclick = () => openInviteGuestModal();
+    }
+
     container.appendChild(grid);
 
 
@@ -2858,7 +2891,7 @@ async function checkSession() {
         if (res.ok) {
             const data = await res.json();
             if (data.authenticated) {
-                state.user = { userid: data.userid };
+                state.user = { userid: data.userid, role: data.role || 'user', hosts: [] };
                 render(); // Render immediately
 
                 // Fetch data in background
@@ -2869,4 +2902,195 @@ async function checkSession() {
     } catch (e) { console.error("Session check failed", e); }
     // If not authenticated, render will show login screen (default)
     if (!state.user) render();
+}
+
+// ================================
+// Guest Management Frontend
+// ================================
+
+async function loadGuestList(container) {
+    try {
+        const res = await fetch(`/api/guests/list?userid=${encodeURIComponent(state.user.userid)}`);
+        const data = await res.json();
+        if (!data.guests || data.guests.length === 0) {
+            container.innerHTML = '<div style="text-align:center; color:var(--text-secondary); padding: 12px;">No guests invited yet.</div>';
+            return;
+        }
+        container.innerHTML = '';
+        const table = document.createElement('div');
+        table.style.cssText = 'display:flex; flex-direction:column; gap:8px;';
+        data.guests.forEach(g => {
+            const statusColor = g.status === 'active' ? '#4ade80' : g.status === 'expired' ? '#fbbf24' : '#f87171';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:12px; padding:10px 14px; background:var(--surface-2, #1e2030); border-radius:8px;';
+            row.innerHTML = `
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:600; font-size:0.9rem;">${g.email}</div>
+                    <div style="font-size:0.75rem; color:var(--text-secondary, #888);">Added: ${g.added_date ? g.added_date.split('T')[0] : '\u2014'} \u00b7 Expires: ${g.access_till ? g.access_till.split('T')[0] : '\u2014'}</div>
+                </div>
+                <span style="padding:3px 10px; border-radius:12px; font-size:0.7rem; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; background:${statusColor}22; color:${statusColor};">${g.status}</span>
+                <div class="guest-actions" style="display:flex; gap:6px;"></div>
+            `;
+            const actions = row.querySelector('.guest-actions');
+            if (g.status === 'active') {
+                actions.appendChild(makeGuestBtn('Revoke', '#f87171', () => guestAction('revoke', g.email)));
+            } else {
+                actions.appendChild(makeGuestBtn('Reactivate', '#4ade80', () => openReactivateModal(g.email)));
+            }
+            actions.appendChild(makeGuestBtn('Delete', '#ef4444', () => guestAction('delete', g.email)));
+            table.appendChild(row);
+        });
+        container.appendChild(table);
+    } catch (e) {
+        container.innerHTML = '<div style="color:#f87171; padding:10px;">Error loading guests.</div>';
+    }
+}
+
+function makeGuestBtn(label, color, onclick) {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.style.cssText = `background:${color}22; color:${color}; border:1px solid ${color}44; border-radius:6px; padding:4px 10px; font-size:0.75rem; font-weight:600; cursor:pointer;`;
+    btn.onclick = onclick;
+    return btn;
+}
+
+async function guestAction(action, email, extraBody = {}) {
+    if (action === 'delete' && !confirm(`Remove guest ${email}?`)) return;
+    if (action === 'revoke' && !confirm(`Revoke access for ${email}?`)) return;
+    try {
+        const res = await fetch(`/api/guests/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userid: state.user.userid, email, ...extraBody })
+        });
+        const data = await res.json();
+        if (data.success) {
+            fetchDashboardStats();
+            render();
+        } else {
+            alert(data.error || 'Action failed');
+        }
+    } catch (e) {
+        alert('Network error');
+    }
+}
+
+function openInviteGuestModal() {
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Invite Guest</div>
+            <button class="modal-close"><i class="fa-solid fa-times"></i></button>
+        </div>
+        <div class="modal-body" style="display:flex; flex-direction:column; gap:12px;">
+            <input type="email" id="guestEmail" placeholder="Guest email address"
+                style="padding:10px 14px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.9rem;">
+            <input type="password" id="guestPassword" placeholder="Set a password for the guest"
+                style="padding:10px 14px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.9rem;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <label style="font-size:0.85rem; color:var(--text-secondary, #888);">Access Duration:</label>
+                <select id="guestDuration" style="padding:8px 12px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.85rem;">
+                    <option value="7">7 days</option>
+                    <option value="14">14 days</option>
+                    <option value="30" selected>30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="90">90 days</option>
+                    <option value="180">6 months</option>
+                    <option value="365">1 year</option>
+                </select>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button id="inviteSubmitBtn" style="
+                background: linear-gradient(135deg, #6c8cff 0%, #a78bfa 100%);
+                color: #fff; border: none; border-radius: 8px; padding: 10px 24px;
+                font-size: 0.9rem; font-weight: 600; cursor: pointer; width: 100%;
+            ">Send Invitation</button>
+        </div>
+    `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    modal.querySelector('.modal-close').onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    modal.querySelector('#inviteSubmitBtn').onclick = async () => {
+        const email = modal.querySelector('#guestEmail').value.trim();
+        const password = modal.querySelector('#guestPassword').value;
+        const duration = modal.querySelector('#guestDuration').value;
+        if (!email || !password) { alert('Email and password are required'); return; }
+        try {
+            const res = await fetch('/api/guests/invite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userid: state.user.userid, email, password, duration_days: parseInt(duration) })
+            });
+            const data = await res.json();
+            if (data.success) {
+                close();
+                fetchDashboardStats();
+                render();
+            } else {
+                alert(data.error || 'Failed to invite guest');
+            }
+        } catch (e) {
+            alert('Network error');
+        }
+    };
+}
+
+function openReactivateModal(email) {
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Reactivate Guest: ${email}</div>
+            <button class="modal-close"><i class="fa-solid fa-times"></i></button>
+        </div>
+        <div class="modal-body" style="display:flex; flex-direction:column; gap:12px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <label style="font-size:0.85rem; color:var(--text-secondary, #888);">New Duration:</label>
+                <select id="reactivateDuration" style="padding:8px 12px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.85rem;">
+                    <option value="7">7 days</option>
+                    <option value="14">14 days</option>
+                    <option value="30" selected>30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="90">90 days</option>
+                    <option value="180">6 months</option>
+                    <option value="365">1 year</option>
+                </select>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button id="reactivateSubmitBtn" style="
+                background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+                color: #fff; border: none; border-radius: 8px; padding: 10px 24px;
+                font-size: 0.9rem; font-weight: 600; cursor: pointer; width: 100%;
+            ">Reactivate</button>
+        </div>
+    `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    modal.querySelector('.modal-close').onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    modal.querySelector('#reactivateSubmitBtn').onclick = async () => {
+        const duration = modal.querySelector('#reactivateDuration').value;
+        await guestAction('reactivate', email, { duration_days: parseInt(duration) });
+        close();
+    };
 }
