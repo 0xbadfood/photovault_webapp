@@ -55,10 +55,7 @@ const state = {
 };
 
 function updateZoom(val) {
-    state.zoomLevel = parseInt(val);
-    const zoomValEl = document.getElementById('zoomValue');
-    if (zoomValEl) zoomValEl.textContent = val + '%';
-    updateViewerTransform();
+    updateZoomUI(val);
 }
 
 // --- API Calls ---
@@ -2334,8 +2331,14 @@ function handleMouseUp() {
 function updateZoomUI(val) {
     const zoomValEl = document.getElementById('zoomValue');
     const rangeInput = document.querySelector('.zoom-slider');
+
+    // Update State and Transform
+    state.zoomLevel = parseInt(val);
+    updateViewerTransform();
+
+    // Update UI Elements
     if (zoomValEl) zoomValEl.textContent = val + '%';
-    if (rangeInput) rangeInput.value = val;
+    if (rangeInput && rangeInput.value !== val) rangeInput.value = val;
 }
 
 function MediaViewer() {
