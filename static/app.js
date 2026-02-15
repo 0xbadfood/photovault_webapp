@@ -828,13 +828,13 @@ function LoginScreen() {
     div.innerHTML = `
         <div class="login-box">
             <img src="/static/logo.png" style="width: 80px; margin-bottom: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
-            <h1>Photos</h1>
+            <h1>Photovault</h1>
             <div id="userLoginSection">
                 <div class="input-group">
-                    <input type="text" id="userid" placeholder="Apple ID (Email)">
+                    <input type="text" id="userid" placeholder="User ID">
                 </div>
                 <div class="input-group">
-                    <input type="password" id="password" placeholder="Password" value="passw0rd">
+                    <input type="password" id="password" placeholder="Password">
                 </div>
                 <button class="login-btn" id="loginBtn">Sign In</button>
             </div>

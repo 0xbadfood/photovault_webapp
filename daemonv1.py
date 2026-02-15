@@ -207,7 +207,15 @@ def scan_and_thumbnail():
                                 conn.commit()
                                 print(f"[Scanner] Thumbnail done: {filename}")
                             except Exception as e:
-                                print(f"[Scanner] Thumbnail error {filename}: {e}")
+                                print(f"[Scanner] Thumbnail error {filename}: {e} — marking as unprocessable")
+                                # Mark as processed so we don't retry every cycle
+                                c.execute("""UPDATE photos SET 
+                                    processed_for_thumbnails = 1, 
+                                    processed_for_exif = 1, 
+                                    processed_for_faces = 1,
+                                    type = 'unidentifiable'
+                                    WHERE id = ?""", (photo_id,))
+                                conn.commit()
                         
                         # --- Task 2: EXIF Extraction ---
                         if not is_video_file(filename) and (not processed_exif or current_type is None):
