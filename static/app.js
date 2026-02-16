@@ -69,7 +69,11 @@ async function login(userid, password) {
         });
         const data = await res.json();
         if (res.ok) {
-            state.user = { userid: data.userid, role: data.role || 'user', hosts: data.hosts || [] };
+            if (data.is_admin) {
+                window.location.href = '/admin';
+                return;
+            }
+            state.user = { userid: data.userid, role: data.role || 'user', hosts: data.hosts || [], force_change: data.force_change };
             state.view = data.role === 'guest' ? 'photos' : 'dashboard';
             render(); // Render immediately
 
@@ -2849,6 +2853,11 @@ function render() {
         app.appendChild(LoginScreen());
     } else {
         app.appendChild(App());
+
+        // Force Password Change Check
+        if (state.user.force_change) {
+            showForceChangeModal();
+        }
     }
 
     // Restore scroll position
@@ -2891,7 +2900,11 @@ async function checkSession() {
         if (res.ok) {
             const data = await res.json();
             if (data.authenticated) {
-                state.user = { userid: data.userid, role: data.role || 'user', hosts: [] };
+                if (data.is_admin) {
+                    window.location.href = '/admin';
+                    return;
+                }
+                state.user = { userid: data.userid, role: data.role || 'user', hosts: [], force_change: data.force_change };
                 render(); // Render immediately
 
                 // Fetch data in background
@@ -3092,5 +3105,78 @@ function openReactivateModal(email) {
         const duration = modal.querySelector('#reactivateDuration').value;
         await guestAction('reactivate', email, { duration_days: parseInt(duration) });
         close();
+    };
+}
+
+function showForceChangeModal() {
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    // Prevent closing by clicking background
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">Change Password Required</div>
+            <!-- No close button -->
+        </div>
+        <div class="modal-body" style="display:flex; flex-direction:column; gap:12px;">
+            <p style="color:var(--text-secondary); font-size:0.9rem;">To secure your account, you must change your password before continuing.</p>
+            <input type="password" id="forceNewPass" placeholder="New Password"
+                style="padding:10px 14px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.9rem;">
+            <input type="password" id="forceConfirmPass" placeholder="Confirm New Password"
+                style="padding:10px 14px; border-radius:8px; border:1px solid var(--border-color, #333); background:var(--surface-2, #1e2030); color:var(--text-primary, #eee); font-size:0.9rem;">
+        </div>
+        <div class="modal-footer">
+            <button id="forceChangeBtn" style="
+                background: linear-gradient(135deg, #6c8cff 0%, #a78bfa 100%);
+                color: #fff; border: none; border-radius: 8px; padding: 10px 24px;
+                font-size: 0.9rem; font-weight: 600; cursor: pointer; width: 100%;
+            ">Update Password</button>
+            <button id="logoutBtn" style="
+                background: transparent; border: 1px solid #444; margin-top: 10px;
+                color: #aaa; border-radius: 8px; padding: 8px 24px;
+                font-size: 0.8rem; cursor: pointer; width: 100%;
+            ">Logout</button>
+        </div>
+    `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // Logout handler
+    modal.querySelector('#logoutBtn').onclick = async () => {
+        await fetch('/api/logout', { method: 'POST' });
+        window.location.reload();
+    };
+
+    // Update handler
+    modal.querySelector('#forceChangeBtn').onclick = async () => {
+        const p1 = modal.querySelector('#forceNewPass').value;
+        const p2 = modal.querySelector('#forceConfirmPass').value;
+
+        if (!p1 || !p2) { alert('Please enter both fields'); return; }
+        if (p1 !== p2) { alert('Passwords do not match'); return; }
+
+        try {
+            const res = await fetch('/api/auth/change_password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ new_password: p1 })
+            });
+
+            const data = await res.json();
+            if (res.ok && data.success) {
+                alert('Password updated successfully!');
+                overlay.remove();
+                state.user.force_change = false; // clear flag locally
+            } else {
+                alert(data.error || 'Failed to update password');
+            }
+        } catch (e) {
+            alert('Network error');
+        }
     };
 }

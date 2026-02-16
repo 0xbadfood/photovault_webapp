@@ -104,12 +104,12 @@ def login():
         # --- Step 1: Check user.sql ---
         conn = sqlite3.connect(USER_DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT password_hash, salt, status, is_admin FROM users WHERE email = ?", (userid,))
+        c.execute("SELECT password_hash, salt, status, is_admin, force_password_change FROM users WHERE email = ?", (userid,))
         row = c.fetchone()
         conn.close()
         
         if row:
-            stored_hash, salt, status, is_admin = row
+            stored_hash, salt, status, is_admin, force_change = row
             if status != 'active':
                 return jsonify({'error': 'Account is not active'}), 403
             calc_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
@@ -118,7 +118,8 @@ def login():
                     'success': True, 
                     'userid': userid,
                     'is_admin': bool(is_admin),
-                    'role': 'user'
+                    'role': 'user',
+                    'force_change': bool(force_change)
                 }))
                 resp.set_cookie('userid', userid, max_age=12 * 60 * 60)
                 resp.set_cookie('role', 'user', max_age=12 * 60 * 60)
@@ -176,8 +177,48 @@ def check_auth():
     userid = request.cookies.get('userid')
     role = request.cookies.get('role', 'user')
     if userid:
-        return jsonify({'authenticated': True, 'userid': userid, 'role': role})
+        is_admin = False
+        force_change = False
+        try:
+            conn = sqlite3.connect(USER_DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT is_admin, force_password_change FROM users WHERE email = ?", (userid,))
+            row = c.fetchone()
+            if row:
+                if row[0]: is_admin = True
+                if row[1]: force_change = True
+            conn.close()
+        except:
+            pass
+        return jsonify({'authenticated': True, 'userid': userid, 'role': role, 'is_admin': is_admin, 'force_change': force_change})
     return jsonify({'authenticated': False}), 401
+
+@app.route('/api/auth/change_password', methods=['POST'])
+def change_password():
+    userid = request.cookies.get('userid')
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    data = request.json
+    new_password = data.get('new_password')
+    
+    if not new_password:
+        return jsonify({'error': 'New password required'}), 400
+        
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        c = conn.cursor()
+        
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.sha256(f"{new_password}{salt}".encode()).hexdigest()
+        
+        c.execute("UPDATE users SET password_hash = ?, salt = ?, force_password_change = 0 WHERE email = ?", (password_hash, salt, userid))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
@@ -798,6 +839,194 @@ def delete_files_batch():
     return jsonify({'success': True, 'deleted': deleted, 'errors': errors})
 
 @app.route('/api/files/delete', methods=['POST'])
+def delete_file():
+    data = request.json
+    userid = data.get('userid')
+    path_arg = data.get('path')
+    
+    if not userid or not path_arg:
+        return jsonify({'error': 'Missing parameters'}), 400
+        
+    user_dir = get_user_dir(userid)
+    target_path = os.path.normpath(os.path.join(user_dir, path_arg))
+    
+    if not target_path.startswith(user_dir):
+        return jsonify({'error': 'Access denied'}), 403
+        
+    if not os.path.exists(target_path):
+        return jsonify({'error': 'File not found'}), 404
+        
+    try:
+        if os.path.isdir(target_path):
+            import shutil
+            shutil.rmtree(target_path)
+        else:
+            os.remove(target_path)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# --- Admin API ---
+
+import reset_db
+
+def admin_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        userid = request.cookies.get('userid')
+        if not userid:
+             return jsonify({'error': 'Unauthorized'}), 401
+        
+        # Check if user is admin
+        conn = sqlite3.connect(USER_DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_admin FROM users WHERE email = ?", (userid,))
+        row = c.fetchone()
+        conn.close()
+        
+        if not row or not row[0]:
+            return jsonify({'error': 'Admin privileges required'}), 403
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/admin')
+@admin_required
+def admin_dashboard():
+    return render_template('admin.html')
+
+@app.route('/api/admin/users', methods=['GET'])
+@admin_required
+def admin_list_users():
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT id, email, is_admin, status, unique_id, created_at FROM users")
+    users = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({'users': users})
+
+@app.route('/api/admin/users', methods=['POST'])
+@admin_required
+def add_user():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+        
+    conn = sqlite3.connect(USER_DB_PATH)
+    c = conn.cursor()
+    
+    # Check if exists
+    c.execute("SELECT id FROM users WHERE email = ?", (email,))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'error': 'User already exists'}), 409
+        
+    try:
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+        unique_id = hashlib.sha256(f"{time.time()}{secrets.token_hex(16)}".encode()).hexdigest()
+        
+        c.execute("""
+            INSERT INTO users (email, password_hash, salt, unique_id, is_admin, status, force_password_change)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+        """, (email, password_hash, salt, unique_id, False, 'active'))
+        conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/admin/users/status', methods=['POST'])
+@admin_required
+def update_user_status():
+    data = request.json
+    userid = data.get('userid') # The email
+    status = data.get('status') # 'active' or 'revoked' (or anything else)
+    
+    if not userid or not status:
+        return jsonify({'error': 'User ID and status required'}), 400
+
+    conn = sqlite3.connect(USER_DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE users SET status = ? WHERE email = ?", (status, userid))
+        conn.commit()
+        if c.rowcount == 0:
+            return jsonify({'error': 'User not found'}), 404
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/admin/users/delete', methods=['POST'])
+@admin_required
+def delete_user_admin():
+    data = request.json
+    userid = data.get('userid') # email
+    destroy_data = data.get('destroy_data', False)
+    
+    if not userid:
+        return jsonify({'error': 'User ID required'}), 400
+        
+    # Prevent deleting yourself
+    current_admin = request.cookies.get('userid')
+    if userid == current_admin:
+        return jsonify({'error': 'Cannot delete yourself'}), 400
+
+    conn = sqlite3.connect(USER_DB_PATH)
+    c = conn.cursor()
+    
+    try:
+        # 1. Remove from users table
+        c.execute("DELETE FROM users WHERE email = ?", (userid,))
+        if c.rowcount == 0:
+            return jsonify({'error': 'User not found'}), 404
+        conn.commit()
+        
+        # 2. Handle data
+        if destroy_data:
+            # Full destruction: user directory
+            user_dir = get_user_dir(userid)
+            if os.path.exists(user_dir):
+               import shutil
+               shutil.rmtree(user_dir)
+        else:
+            # Metadata only: clean DB, thumbnails, shared
+            # Use reset_db logic
+            # We must be careful because reset_db asks for input() confirmation by default!
+            # We need to bypass input in reset_db or re-implement logic.
+            # reset_db.reset_database(userid) checks input.
+            # Let's re-implement the safe logic here to avoid stuck process or modifying reset_db.py
+            
+            user_path = get_user_dir(userid)
+            db_path = os.path.join(user_path, 'photovault.db')
+            thumbs_dir = os.path.join(user_path, 'thumbnails')
+            shared_dir = os.path.join(user_path, 'shared')
+            
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            if os.path.exists(thumbs_dir):
+                import shutil
+                shutil.rmtree(thumbs_dir)
+                os.makedirs(thumbs_dir, exist_ok=True)
+            if os.path.exists(shared_dir):
+                import shutil
+                shutil.rmtree(shared_dir)
+                
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
 def delete_file():
     data = request.json
     userid = data.get('userid')
