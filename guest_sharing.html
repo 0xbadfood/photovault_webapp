@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhotoVault — Guest Sharing Design</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #242836;
+            --border: #2e3346;
+            --accent: #6c8cff;
+            --accent-dim: rgba(108, 140, 255, 0.15);
+            --green: #4ade80;
+            --green-dim: rgba(74, 222, 128, 0.12);
+            --amber: #fbbf24;
+            --amber-dim: rgba(251, 191, 36, 0.12);
+            --red: #f87171;
+            --red-dim: rgba(248, 113, 113, 0.12);
+            --purple: #a78bfa;
+            --purple-dim: rgba(167, 139, 250, 0.12);
+            --text: #e2e8f0;
+            --text-dim: #94a3b8;
+            --text-muted: #64748b;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, #1a1040 0%, #0f1117 50%, #0a1628 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 60px 40px 50px;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa, #6c8cff, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 12px;
+        }
+
+        .hero .subtitle {
+            font-size: 1.1rem;
+            color: var(--text-dim);
+            max-width: 620px;
+            margin: 0 auto;
+        }
+
+        .hero .badge {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            background: var(--purple-dim);
+            color: var(--purple);
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .container {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 40px 24px 80px;
+        }
+
+        section {
+            margin-bottom: 48px;
+        }
+
+        section h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        section h2 .icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+        }
+
+        h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin: 20px 0 12px;
+        }
+
+        p,
+        li {
+            color: var(--text-dim);
+            font-size: 0.95rem;
+        }
+
+        p {
+            margin-bottom: 14px;
+        }
+
+        ul {
+            padding-left: 20px;
+            margin-bottom: 14px;
+        }
+
+        li {
+            margin-bottom: 6px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+
+        .card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.9rem;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: var(--surface-2);
+        }
+
+        td {
+            color: var(--text-dim);
+        }
+
+        tr:hover td {
+            background: var(--surface);
+        }
+
+        pre {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            overflow-x: auto;
+            font-family: var(--mono);
+            font-size: 0.85rem;
+            line-height: 1.6;
+            color: var(--text-dim);
+            margin: 16px 0;
+        }
+
+        code {
+            font-family: var(--mono);
+            font-size: 0.85rem;
+            background: var(--surface-2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: var(--accent);
+        }
+
+        .alert {
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-size: 0.9rem;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .alert.info {
+            background: var(--accent-dim);
+            border-left: 3px solid var(--accent);
+            color: #93b4ff;
+        }
+
+        .alert.warn {
+            background: var(--amber-dim);
+            border-left: 3px solid var(--amber);
+            color: #fcd473;
+        }
+
+        .alert.success {
+            background: var(--green-dim);
+            border-left: 3px solid var(--green);
+            color: #86efac;
+        }
+
+        .alert.purple {
+            background: var(--purple-dim);
+            border-left: 3px solid var(--purple);
+            color: #c4b5fd;
+        }
+
+        .alert .alert-icon {
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        /* ER Diagram */
+        .er-diagram {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 30px;
+            margin: 20px 0;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .er-entity {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            min-width: 240px;
+            overflow: hidden;
+        }
+
+        .er-entity .er-title {
+            padding: 10px 16px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .er-entity .er-fields {
+            padding: 8px 0;
+        }
+
+        .er-entity .er-field {
+            padding: 4px 16px;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+        }
+
+        .er-entity .er-field .type {
+            color: var(--text-muted);
+        }
+
+        .er-entity .er-field.pk {
+            color: var(--amber);
+        }
+
+        .er-entity .er-field.fk {
+            color: var(--accent);
+        }
+
+        .er-entity.t1 .er-title {
+            background: var(--green-dim);
+            color: var(--green);
+        }
+
+        .er-entity.t2 .er-title {
+            background: var(--accent-dim);
+            color: var(--accent);
+        }
+
+        .er-entity.t3 .er-title {
+            background: var(--purple-dim);
+            color: var(--purple);
+        }
+
+        /* Ref counter visual */
+        .counter-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin: 16px 0;
+        }
+
+        .counter-step {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        .counter-step .step-num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .counter-step .count {
+            margin-left: auto;
+            font-family: var(--mono);
+            font-weight: 700;
+            padding: 2px 10px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+
+        .counter-step.add {
+            background: var(--green-dim);
+        }
+
+        .counter-step.add .step-num {
+            background: var(--green);
+            color: var(--bg);
+        }
+
+        .counter-step.add .count {
+            background: var(--green-dim);
+            color: var(--green);
+        }
+
+        .counter-step.sub {
+            background: var(--amber-dim);
+        }
+
+        .counter-step.sub .step-num {
+            background: var(--amber);
+            color: var(--bg);
+        }
+
+        .counter-step.sub .count {
+            background: var(--amber-dim);
+            color: var(--amber);
+        }
+
+        .counter-step.del {
+            background: var(--red-dim);
+        }
+
+        .counter-step.del .step-num {
+            background: var(--red);
+            color: var(--bg);
+        }
+
+        .counter-step.del .count {
+            background: var(--red-dim);
+            color: var(--red);
+        }
+
+        /* Endpoint table */
+        .method-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .method-badge.get {
+            background: var(--green-dim);
+            color: var(--green);
+        }
+
+        .method-badge.post {
+            background: var(--accent-dim);
+            color: var(--accent);
+        }
+
+        /* Flow */
+        .flow-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin: 16px 0;
+        }
+
+        @media (max-width: 700px) {
+            .flow-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .flow-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .flow-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .flow-card.user::before {
+            background: var(--green);
+        }
+
+        .flow-card.guest::before {
+            background: var(--purple);
+        }
+
+        .flow-card .flow-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .flow-card.user .flow-label {
+            color: var(--green);
+        }
+
+        .flow-card.guest .flow-label {
+            color: var(--purple);
+        }
+
+        .flow-card h4 {
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+
+        .flow-card ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .flow-card ul li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.88rem;
+        }
+
+        .flow-card ul li:last-child {
+            border-bottom: none;
+        }
+
+        .flow-card .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .flow-card.user .dot {
+            background: var(--green);
+        }
+
+        .flow-card.guest .dot {
+            background: var(--purple);
+        }
+
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+
+    <div class="hero">
+        <h1>Guest Sharing Architecture</h1>
+        <p class="subtitle">
+            Invite read-only guests to view your shared photos and albums.
+            Full reference-counted lifecycle with per-host access control.
+        </p>
+        <span class="badge">guest_sharing — Design Document v2</span>
+    </div>
+
+    <div class="container">
+
+        <!-- Overview -->
+        <section>
+            <h2><span class="icon" style="background:var(--purple-dim);color:var(--purple);">👥</span> Overview</h2>
+            <p>
+                Photovault users can invite <strong>guests</strong> — external users who can <em>view</em> shared
+                photos, videos, and albums in a read-only interface. A guest can be invited by multiple hosts,
+                each managing their own access independently.
+            </p>
+            <div class="flow-grid">
+                <div class="flow-card user">
+                    <div class="flow-label">Photovault User (Host)</div>
+                    <h4>Full Access</h4>
+                    <ul>
+                        <li><span class="dot"></span> Upload &amp; manage photos</li>
+                        <li><span class="dot"></span> Create albums</li>
+                        <li><span class="dot"></span> Share with users &amp; guests</li>
+                        <li><span class="dot"></span> Invite / revoke / reactivate guests</li>
+                        <li><span class="dot"></span> Face recognition &amp; AI features</li>
+                    </ul>
+                </div>
+                <div class="flow-card guest">
+                    <div class="flow-label">Guest (Read-Only)</div>
+                    <h4>View Only</h4>
+                    <ul>
+                        <li><span class="dot"></span> View shared photos &amp; albums</li>
+                        <li><span class="dot"></span> Browse People gallery</li>
+                        <li><span class="dot"></span> Browse Discover/Memories</li>
+                        <li><span class="dot"></span> ❌ Cannot share, edit, or delete</li>
+                        <li><span class="dot"></span> ❌ Time-limited access</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- Database Schema -->
+        <section>
+            <h2><span class="icon" style="background:var(--accent-dim);color:var(--accent);">🗄</span> Database Schema —
+                <code>guest.sql</code></h2>
+
+            <p>A <strong>global</strong> SQLite database with 3 normalized tables:</p>
+
+            <div class="er-diagram">
+                <div class="er-entity t1">
+                    <div class="er-title">guests</div>
+                    <div class="er-fields">
+                        <div class="er-field pk"><span>id</span><span class="type">PK INTEGER</span></div>
+                        <div class="er-field"><span>email</span><span class="type">TEXT UNIQUE</span></div>
+                        <div class="er-field"><span>password_hash</span><span class="type">TEXT</span></div>
+                        <div class="er-field"><span>password_salt</span><span class="type">TEXT</span></div>
+                        <div class="er-field"><span>host_count</span><span class="type">INTEGER (ref counter)</span>
+                        </div>
+                        <div class="er-field"><span>created_at</span><span class="type">DATETIME</span></div>
+                        <div class="er-field"><span>last_login</span><span class="type">DATETIME</span></div>
+                    </div>
+                </div>
+                <div class="er-entity t2">
+                    <div class="er-title">guest_hosts</div>
+                    <div class="er-fields">
+                        <div class="er-field pk"><span>id</span><span class="type">PK INTEGER</span></div>
+                        <div class="er-field fk"><span>guest_id</span><span class="type">FK → guests</span></div>
+                        <div class="er-field"><span>host_email</span><span class="type">TEXT</span></div>
+                        <div class="er-field"><span>added_date</span><span class="type">DATETIME</span></div>
+                        <div class="er-field"><span>last_activated_date</span><span class="type">DATETIME</span></div>
+                        <div class="er-field"><span>access_till</span><span class="type">DATETIME</span></div>
+                        <div class="er-field"><span>status</span><span class="type">TEXT</span></div>
+                    </div>
+                </div>
+                <div class="er-entity t3">
+                    <div class="er-title">guest_assets</div>
+                    <div class="er-fields">
+                        <div class="er-field pk"><span>id</span><span class="type">PK INTEGER</span></div>
+                        <div class="er-field fk"><span>guest_id</span><span class="type">FK → guests</span></div>
+                        <div class="er-field"><span>host_email</span><span class="type">TEXT</span></div>
+                        <div class="er-field"><span>asset_type</span><span class="type">TEXT (photo|album)</span></div>
+                        <div class="er-field"><span>asset_id</span><span class="type">INT (host DB)</span></div>
+                        <div class="er-field"><span>guest_asset_id</span><span class="type">INT (guest DB)</span></div>
+                        <div class="er-field"><span>shared_at</span><span class="type">DATETIME</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="alert info">
+                <span class="alert-icon">ℹ</span>
+                <span><strong>Per-User DB for Guests:</strong> Each guest gets their own data directory
+                    (<code>../backup/data/guest@email.com/</code>) and <code>photovault.db</code>.
+                    This reuses the existing symlink-based sharing infrastructure — no new plumbing needed.</span>
+            </div>
+        </section>
+
+        <!-- Reference Counter -->
+        <section>
+            <h2><span class="icon" style="background:var(--amber-dim);color:var(--amber);">#</span> Reference Counter
+                Flow</h2>
+
+            <p>The <code>host_count</code> field on the <code>guests</code> table tracks how many hosts have
+                active invitations for this guest. When it reaches <strong>0</strong>, the guest account is fully
+                deleted.</p>
+
+            <div class="counter-flow">
+                <div class="counter-step add">
+                    <span class="step-num">1</span>
+                    <span>Host A invites <code>guest@example.com</code></span>
+                    <span class="count">host_count = 1</span>
+                </div>
+                <div class="counter-step add">
+                    <span class="step-num">2</span>
+                    <span>Host B also invites <code>guest@example.com</code></span>
+                    <span class="count">host_count = 2</span>
+                </div>
+                <div class="counter-step sub">
+                    <span class="step-num">3</span>
+                    <span>Host A removes guest — only A's shared assets cleaned up</span>
+                    <span class="count">host_count = 1</span>
+                </div>
+                <div class="counter-step del">
+                    <span class="step-num">4</span>
+                    <span>Host B removes guest — account deleted entirely</span>
+                    <span class="count">host_count = 0 → DELETE</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- API Endpoints -->
+        <section>
+            <h2><span class="icon" style="background:var(--green-dim);color:var(--green);">⚡</span> API Endpoints</h2>
+
+            <h3>New Guest Management Endpoints</h3>
+            <table>
+                <tr>
+                    <th>Endpoint</th>
+                    <th>Method</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td><code>/api/guests/list</code></td>
+                    <td><span class="method-badge get">GET</span></td>
+                    <td>List current user's invited guests with status</td>
+                </tr>
+                <tr>
+                    <td><code>/api/guests/invite</code></td>
+                    <td><span class="method-badge post">POST</span></td>
+                    <td>Invite new guest (email, password, duration_days)</td>
+                </tr>
+                <tr>
+                    <td><code>/api/guests/delete</code></td>
+                    <td><span class="method-badge post">POST</span></td>
+                    <td>Remove invitation, decrement counter, cleanup assets</td>
+                </tr>
+                <tr>
+                    <td><code>/api/guests/revoke</code></td>
+                    <td><span class="method-badge post">POST</span></td>
+                    <td>Set guest status to <code>inactive</code></td>
+                </tr>
+                <tr>
+                    <td><code>/api/guests/reactivate</code></td>
+                    <td><span class="method-badge post">POST</span></td>
+                    <td>Reactivate with new duration</td>
+                </tr>
+            </table>
+
+            <h3>Modified Endpoints</h3>
+            <table>
+                <tr>
+                    <th>Endpoint</th>
+                    <th>Change</th>
+                </tr>
+                <tr>
+                    <td><code>POST /api/login</code></td>
+                    <td>Check <code>user.sql</code> → <code>guest.sql</code> fallback. Returns <code>role</code> field.
+                        Validates <code>access_till</code></td>
+                </tr>
+                <tr>
+                    <td><code>GET /api/users/list</code></td>
+                    <td>Also returns active guests of current host (with <code>(Guest)</code> badge data)</td>
+                </tr>
+                <tr>
+                    <td><em>All mutating endpoints</em></td>
+                    <td>Auth guard rejects requests from guest-role users with 403</td>
+                </tr>
+            </table>
+        </section>
+
+        <!-- Auth Flow -->
+        <section>
+            <h2><span class="icon" style="background:var(--accent-dim);color:var(--accent);">🔒</span> Login Flow</h2>
+
+            <div class="card">
+                <h4>Dual-Auth Login Sequence</h4>
+                <pre>
+<span style="color:var(--green);">1.</span> User submits email + password
+
+<span style="color:var(--green);">2.</span> Server checks <span style="color:var(--accent);">user.sql</span>
+   → Match found? Return <span style="color:var(--green);">{ role: 'user', userid: email }</span>
+
+<span style="color:var(--amber);">3.</span> No match → check <span style="color:var(--purple);">guest.sql</span>
+   → Find guest record by email
+   → Verify password hash
+   → Check ANY <span style="color:var(--accent);">guest_hosts</span> row with status='active' AND access_till >= now
+   → Return <span style="color:var(--purple);">{ role: 'guest', userid: email, hosts: [...] }</span>
+
+<span style="color:var(--red);">4.</span> No match in either DB → <span style="color:var(--red);">401 Unauthorized</span>
+</pre>
+            </div>
+        </section>
+
+        <!-- Frontend Changes -->
+        <section>
+            <h2><span class="icon" style="background:var(--purple-dim);color:var(--purple);">🎨</span> Frontend Changes
+            </h2>
+
+            <table>
+                <tr>
+                    <th>Area</th>
+                    <th>Change</th>
+                </tr>
+                <tr>
+                    <td>Login Response</td>
+                    <td>Store <code>state.user.role</code> (<code>'user'</code> or <code>'guest'</code>)</td>
+                </tr>
+                <tr>
+                    <td>Dashboard</td>
+                    <td>New "Guest Management" card — list, invite, revoke, reactivate, delete</td>
+                </tr>
+                <tr>
+                    <td>Share Picker</td>
+                    <td>Active guests shown with <code>(Guest)</code> badge</td>
+                </tr>
+                <tr>
+                    <td>Guest UI</td>
+                    <td>Read-only mode: hide share/edit/delete buttons, hide guest management</td>
+                </tr>
+                <tr>
+                    <td>Nav Bar</td>
+                    <td>Optionally hide Files tab for guests</td>
+                </tr>
+            </table>
+        </section>
+
+        <!-- Guest Asset Tracking -->
+        <section>
+            <h2><span class="icon" style="background:var(--purple-dim);color:var(--purple);">📦</span> Asset Tracking —
+                <code>guest_assets</code></h2>
+
+            <p>When a host shares a photo or album with a guest, a record is created in <code>guest_assets</code>
+                linking the host's asset ID to the guest's copy (symlinked in the guest's per-user DB).</p>
+
+            <div class="card">
+                <h4>Share Flow</h4>
+                <pre>
+<span style="color:var(--green);">Host shares photo #42 with guest@example.com</span>
+
+1. Existing <code>share_photo()</code> creates symlink + DB record in guest's per-user DB
+   → guest gets photo_id #7 in their own photovault.db
+
+2. New: INSERT into <span style="color:var(--purple);">guest_assets</span>:
+   guest_id=3, host_email='host@pv.com', asset_type='photo',
+   asset_id=42, guest_asset_id=7
+
+<span style="color:var(--amber);">Host removes guest or revokes access</span>
+
+1. Query <span style="color:var(--purple);">guest_assets</span> for this guest + host combination
+2. For each asset: remove symlinks + DB records from guest's per-user DB
+3. Delete <span style="color:var(--purple);">guest_assets</span> rows
+4. Decrement <code>host_count</code>
+</pre>
+            </div>
+
+            <div class="alert success">
+                <span class="alert-icon">✓</span>
+                <span>This design cleanly separates per-host shared assets, so removing one host's invitation
+                    only cleans up <em>that host's</em> shared content — assets from other hosts remain
+                    untouched.</span>
+            </div>
+        </section>
+
+        <!-- Complexity -->
+        <section>
+            <h2><span class="icon" style="background:var(--red-dim);color:var(--red);">⚠</span> Complexity Challenges
+            </h2>
+            <table>
+                <tr>
+                    <th>#</th>
+                    <th>Challenge</th>
+                    <th>Solution</th>
+                </tr>
+                <tr>
+                    <td>1</td>
+                    <td>Per-User Databases</td>
+                    <td>Give guests a per-user DB + data dir. Reuse symlink sharing ✅</td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td>Dual Auth (user vs guest)</td>
+                    <td>Login checks <code>user.sql</code> then <code>guest.sql</code>, returns <code>role</code></td>
+                </tr>
+                <tr>
+                    <td>3</td>
+                    <td>Share Picker</td>
+                    <td><code>list_users()</code> also returns active guests of current host</td>
+                </tr>
+                <tr>
+                    <td>4</td>
+                    <td>Re-share Prevention</td>
+                    <td>Auth guard on all mutating endpoints rejects guest-role users</td>
+                </tr>
+                <tr>
+                    <td>5</td>
+                    <td>Cascade on User Delete</td>
+                    <td>Reference counter — decrement on remove, delete at 0</td>
+                </tr>
+                <tr>
+                    <td>6</td>
+                    <td>Access Expiry</td>
+                    <td>Check <code>access_till</code> at login time</td>
+                </tr>
+            </table>
+        </section>
+
+    </div>
+
+    <footer>
+        PhotoVault — Guest Sharing Design Document &bull; February 2026
+    </footer>
+
+</body>
+
+</html>
