@@ -2,7 +2,7 @@ import os
 import time
 import sqlite3
 import database
-from PIL import Image
+from PIL import Image, ImageOps
 import traceback
 from threading import Thread
 
@@ -83,19 +83,55 @@ def extract_date_from_filename(filename):
     return None
 
 def generate_video_thumbnail(video_path, thumb_path):
+    """
+    Extract a frame from a video at 1s into the clip and save as a 300x300 JPEG thumbnail.
+    Uses ffmpeg with -noautorotate disabled (autorotate ON by default) so rotation metadata
+    in the container is honoured. The extracted frame is then post-processed through PIL
+    exif_transpose as a safety net for any residual EXIF orientation tag on the JPEG.
+    """
+    import subprocess
+    import tempfile
     try:
+        # Write a raw frame to a temp file, then post-process with PIL for resize + orient
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp_path = tmp.name
+
         cmd = [
-            'ffmpeg', '-y', 
-            '-i', video_path, 
-            '-ss', '00:00:01.000', 
-            '-vframes', '1', 
-            thumb_path
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-ss', '00:00:01.000',
+            '-vframes', '1',
+            # Resize to at most 300x300, preserving aspect ratio
+            '-vf', "scale='min(300,iw)':'min(300,ih)':force_original_aspect_ratio=decrease",
+            tmp_path
         ]
-        import subprocess
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            # Try without time-seek (some files fail with -ss before -i)
+            cmd2 = [
+                'ffmpeg', '-y',
+                '-i', video_path,
+                '-vframes', '1',
+                '-vf', "scale='min(300,iw)':'min(300,ih)':force_original_aspect_ratio=decrease",
+                tmp_path
+            ]
+            subprocess.run(cmd2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        # Post-process: apply EXIF orientation if present, convert to RGB JPEG
+        with Image.open(tmp_path) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            img.save(thumb_path, 'JPEG', quality=80)
+
+        os.unlink(tmp_path)
         return True
     except Exception as e:
         print(f"Error generating video thumbnail for {video_path}: {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
         return False
 
 def get_db_connection_wal(userid):
@@ -193,19 +229,27 @@ def scan_and_thumbnail():
                                 
                                 thumb_out = os.path.join(thumb_dir, safe_name)
                                 
-                                if not os.path.exists(thumb_out):
-                                    if is_video_file(filename):
-                                        generate_video_thumbnail(full_path, thumb_out)
-                                    else:
-                                        with Image.open(full_path) as img:
-                                            img.thumbnail((300, 300))
-                                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                                                img = img.convert('RGB')
-                                            img.save(thumb_out, 'JPEG', quality=80)
-                                
-                                c.execute("UPDATE photos SET processed_for_thumbnails = 1 WHERE id = ?", (photo_id,))
-                                conn.commit()
-                                print(f"[Scanner] Thumbnail done: {filename}")
+                                thumb_success = False
+                                if os.path.exists(thumb_out):
+                                    # Already generated in a previous (partial) run
+                                    thumb_success = True
+                                elif is_video_file(filename):
+                                    thumb_success = generate_video_thumbnail(full_path, thumb_out)
+                                else:
+                                    with Image.open(full_path) as img:
+                                        img = ImageOps.exif_transpose(img)  # honour EXIF Orientation tag
+                                        img.thumbnail((300, 300))
+                                        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                            img = img.convert('RGB')
+                                        img.save(thumb_out, 'JPEG', quality=80)
+                                        thumb_success = True
+
+                                if thumb_success:
+                                    c.execute("UPDATE photos SET processed_for_thumbnails = 1 WHERE id = ?", (photo_id,))
+                                    conn.commit()
+                                    print(f"[Scanner] Thumbnail done: {filename}")
+                                else:
+                                    print(f"[Scanner] Thumbnail generation failed for {filename}, will retry next cycle")
                             except Exception as e:
                                 print(f"[Scanner] Thumbnail error {filename}: {e} — marking as unprocessable")
                                 # Mark as processed so we don't retry every cycle
@@ -574,7 +618,7 @@ def process_faces(conn, photo_id, image_path, userid):
         thumb_dir = get_thumbnail_dir(userid)
         
         for i, encoding in enumerate(face_encodings):
-            matches = face_recognition.compare_faces(known_encodings, encoding, tolerance=0.6)
+            matches = face_recognition.compare_faces(known_encodings, encoding, tolerance=0.45)
             face_distances = face_recognition.face_distance(known_encodings, encoding)
             
             p_id = None

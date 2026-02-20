@@ -2,11 +2,12 @@ import os
 import hashlib
 import secrets
 import sqlite3
+import subprocess
 import database
 import zipfile
 import io
 import time
-from flask import Flask, request, jsonify, send_from_directory, render_template, abort, send_file
+from flask import Flask, request, jsonify, send_from_directory, render_template, abort, send_file, Response, stream_with_context
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = secrets.token_hex(16)
@@ -286,6 +287,56 @@ def send_file_partial(path):
     It is much more robust than hand-rolled partial content responses.
     """
     return send_file(path, conditional=True)
+
+# Extensions that browsers cannot play natively — must be transcoded
+BROWSER_INCOMPATIBLE_VIDEO_EXTS = {'.mts', '.m2ts', '.avi', '.mkv'}
+
+@app.route('/resource/video/<userid>/<device>/<path:filename>')
+def serve_video_transcoded(userid, device, filename):
+    """
+    Stream-transcode browser-incompatible video formats (MTS, M2TS, AVI, MKV)
+    to H.264/AAC MP4 on-the-fly via ffmpeg so the browser can play them.
+    """
+    user_dir = get_user_dir(userid)
+    file_path = os.path.join(user_dir, device, 'files', filename)
+    if not os.path.abspath(file_path).startswith(os.path.abspath(user_dir)):
+        abort(403)
+    if not os.path.exists(file_path):
+        abort(404)
+
+    def generate():
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', file_path,
+            '-vcodec', 'libx264',
+            '-preset', 'ultrafast',   # minimise latency before first frame
+            '-crf', '23',
+            '-acodec', 'aac',
+            '-b:a', '128k',
+            '-movflags', 'frag_keyframe+empty_moov+faststart',  # streaming-friendly MP4
+            '-f', 'mp4',
+            'pipe:1',
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='video/mp4',
+        headers={'X-Accel-Buffering': 'no'},  # disable nginx buffering if behind a proxy
+    )
 
 @app.route('/resource/image/<userid>/<device>/<path:filename>')
 def serve_image(userid, device, filename):
@@ -1746,15 +1797,21 @@ def build_photo_response(abs_path, photo_id, media_type=None, userid=None):
             rel_path = abs_path[files_dir_idx+7:]
             safe_base = rel_path.replace(os.path.sep, '_')
             safe_thumb = f"{device}__{safe_base}" if safe_base.lower().endswith('.jpg') else f"{device}__{safe_base}.jpg"
-            
+
+            ext = os.path.splitext(abs_path)[1].lower()
             if not media_type:
-                ext = os.path.splitext(abs_path)[1].lower()
                 media_type = 'video' if ext in ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m2ts') else 'image'
+
+            # Browser-incompatible formats must be served via the transcoder endpoint
+            if ext in BROWSER_INCOMPATIBLE_VIDEO_EXTS:
+                video_url = f"/resource/video/{file_userid}/{device}/{rel_path}"
+            else:
+                video_url = f"/resource/image/{file_userid}/{device}/{rel_path}"
 
             result = {
                 'id': photo_id,
                 'thumbnail_url': f"/resource/thumbnail/{file_userid}/{safe_thumb}",
-                'image_url': f"/resource/image/{file_userid}/{device}/{rel_path}",
+                'image_url': video_url,
                 'type': media_type,
                 'is_video': media_type == 'video',
                 'shared_with': [],
@@ -1975,8 +2032,15 @@ def share_photo():
                         for rp in recip_c.fetchall():
                             if rp['embedding_blob']:
                                 recip_embedding = database.convert_array(rp['embedding_blob'])
+                                # Only compare embeddings of the same dimension to avoid
+                                # cross-daemon (v1 128-dim vs v2 512-dim) false matches.
+                                if owner_embedding.shape != recip_embedding.shape:
+                                    continue
                                 distance = np.linalg.norm(owner_embedding - recip_embedding)
-                                if distance < 0.6:  # Same tolerance as face_recognition
+                                # dlib (128-dim): same person < 0.6
+                                # InsightFace (512-dim, unit-normalised): same person < 1.0
+                                threshold = 0.6 if owner_embedding.shape[0] == 128 else 1.0
+                                if distance < threshold:
                                     recip_person_id = rp['id']
                                     break
                     

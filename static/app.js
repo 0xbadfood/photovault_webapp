@@ -1506,7 +1506,7 @@ function FileExplorer() {
                         const p = parseImagePath(state.currentPath, i.name);
                         if (!p) return null;
                         const lowerName = i.name.toLowerCase();
-                        const isVideo = lowerName.match(/\.(mp4|mov|avi|mkv|webm)$/);
+                        const isVideo = lowerName.match(/\.(mp4|mov|avi|mkv|webm|mts|m2ts)$/);
                         const isImage = lowerName.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)$/);
 
                         if (!isVideo && !isImage) return null;
@@ -1523,7 +1523,7 @@ function FileExplorer() {
                     state.viewerIndex = validItems.findIndex(i => i.name === item.name);
 
                     // Detect if video
-                    const isVideo = item.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm)$/);
+                    const isVideo = item.name.toLowerCase().match(/\.(mp4|mov|avi|mkv|webm|mts|m2ts)$/);
                     state.viewerImage = {
                         src: parsed.url,
                         type: isVideo ? 'video' : 'image',
@@ -1575,33 +1575,32 @@ function formatSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Extensions that require server-side transcoding (must match BROWSER_INCOMPATIBLE_VIDEO_EXTS in server.py)
+const BROWSER_INCOMPATIBLE_VIDEO_EXTS = ['mts', 'm2ts', 'avi', 'mkv'];
+
 // Helper to determine if a file explorer path matches the server's image serving structure
 function parseImagePath(dirPath, filename) {
-    // Server serves: /resource/image/<userid>/<device>/<filename>
+    // Server serves: /resource/image/<userid>/<device>/<filename>  (or /resource/video/ for incompatible formats)
     // Where valid internal path is: user_dir/<device>/files/<filename>
 
     // Check if dirPath starts with "something/files"
     const parts = dirPath.split('/');
     if (parts.length >= 2 && parts[1] === 'files') {
         const device = parts[0];
-        // The "filename" arg in server route is <path:filename>, so it includes subdirs if any
-        // If dirPath is "myiphone/files/subdir", rest is "subdir"
         const relativeSubdir = parts.slice(2).join('/');
         const finalPath = relativeSubdir ? `${relativeSubdir}/${filename}` : filename;
 
-        // original URL for img src
-        const url = `/resource/image/${state.user.userid}/${device}/${finalPath}`;
+        const ext = filename.split('.').pop().toLowerCase();
+        const routePrefix = BROWSER_INCOMPATIBLE_VIDEO_EXTS.includes(ext)
+            ? 'video'
+            : 'image';
 
-        // Construct Real Path relative to user root for metadata API
-        // This must match database path structure: <device>/files/<subdir>/<filename>
+        const url = `/resource/${routePrefix}/${state.user.userid}/${device}/${finalPath}`;
         const realPath = `${device}/files/${finalPath}`;
 
-        return {
-            url: url,
-            path: realPath
-        };
+        return { url, path: realPath };
     }
-    return null; // Not viewable via the standard image route
+    return null;
 }
 
 // --- Timeline View (for Photos tab) ---
