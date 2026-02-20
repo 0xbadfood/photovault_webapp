@@ -24,13 +24,13 @@ def get_user_dir(userid):
 def get_thumbnail_dir(userid):
     return os.path.join(get_user_dir(userid), 'thumbnails')
 
-ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.mp4', '.mov', '.avi', '.mkv'}
+ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m2ts'}
 
 def is_image_file(filename):
     return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
 
 def is_video_file(filename):
-    return filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
+    return filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m2ts'))
 
 def determine_image_type(filename, exif_data=None):
     """
@@ -184,7 +184,7 @@ def scan_and_thumbnail():
                                 rel_from_files = os.path.relpath(full_path, files_dir)
                                 safe_base = rel_from_files.replace(os.path.sep, '_')
                                 
-                                if safe_base.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.avi', '.mkv')):
+                                if safe_base.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m2ts')):
                                     safe_name = f"{device}__{safe_base}.jpg"
                                     if safe_base.lower().endswith('.jpg'):
                                         safe_name = f"{device}__{safe_base}"

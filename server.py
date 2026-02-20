@@ -1749,13 +1749,14 @@ def build_photo_response(abs_path, photo_id, media_type=None, userid=None):
             
             if not media_type:
                 ext = os.path.splitext(abs_path)[1].lower()
-                media_type = 'video' if ext in ('.mp4', '.mov', '.avi', '.mkv', '.webm') else 'image'
+                media_type = 'video' if ext in ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.mts', '.m2ts') else 'image'
 
             result = {
                 'id': photo_id,
                 'thumbnail_url': f"/resource/thumbnail/{file_userid}/{safe_thumb}",
                 'image_url': f"/resource/image/{file_userid}/{device}/{rel_path}",
                 'type': media_type,
+                'is_video': media_type == 'video',
                 'shared_with': [],
                 'is_received': False
             }
