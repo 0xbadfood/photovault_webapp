@@ -878,7 +878,7 @@ function Sidebar() {
     const nav = document.createElement('div');
     nav.className = 'sidebar-nav';
 
-    const items = [
+    let items = [
         { id: 'dashboard', icon: 'fa-table-columns', label: 'Dashboard', adminOnly: false },
         { id: 'photos', icon: 'fa-image', label: 'Photos', adminOnly: false },
         { id: 'videos', icon: 'fa-video', label: 'Videos', adminOnly: false },
@@ -893,10 +893,9 @@ function Sidebar() {
     ];
 
     // Guests: only show photos, screenshots, videos, albums
-    let filteredItems = items;
     if (state.user && state.user.role === 'guest') {
         const guestTabs = ['photos', 'screenshots', 'videos', 'albums'];
-        items = allItems.filter(i => guestTabs.includes(i.id));
+        items = items.filter(i => guestTabs.includes(i.id));
     }
 
     items.forEach(item => {
@@ -2897,17 +2896,23 @@ function UploadView() {
     dropzone.style.cursor = 'pointer';
     dropzone.style.transition = 'background 0.2s, border-color 0.2s';
 
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
     dropzone.innerHTML = `
         <i class="fa-solid fa-cloud-arrow-up" style="font-size: 48px; color: var(--accent-color); margin-bottom: 16px;"></i>
-        <h3 style="margin-bottom: 8px;">Click or drag folders here to upload</h3>
-        <p style="color: var(--text-secondary); font-size: 0.9rem;">Folders will be traversed recursively to find media files</p>
+        <h3 style="margin-bottom: 8px;">${isMobile ? 'Tap here to upload media' : 'Click or drag folders here to upload'}</h3>
+        <p style="color: var(--text-secondary); font-size: 0.9rem;">${isMobile ? 'Select photos and videos from your gallery' : 'Folders will be traversed recursively to find media files'}</p>
     `;
 
     // Hidden file input to allow selecting folders manually via browsing
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.multiple = true;
-    fileInput.webkitdirectory = true;
+    if (!isMobile) {
+        fileInput.webkitdirectory = true;
+    } else {
+        fileInput.accept = 'image/*,video/*';
+    }
     fileInput.style.display = 'none';
 
     fileInput.addEventListener('change', (e) => {
