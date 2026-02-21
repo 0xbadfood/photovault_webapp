@@ -1,0 +1,2 @@
+sudo systemctl status photovault-webapp
+sudo systemctl status photovault-daemon

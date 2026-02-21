@@ -40,6 +40,10 @@ const state = {
     // Sharing State
     sharedPhotos: {}, // { ownerEmail: [photos] }
 
+    // Selection Mode
+    selectedPhotos: new Set(), // Set of photo IDs
+    selectionMode: false,
+
     loading: false,
     viewerImage: null, // { src: string } or null
     viewerList: [], // Array of media items for navigation
@@ -543,7 +547,99 @@ function refreshViewData() {
 }
 
 
+
+// --- Selection Mode Helpers ---
+
+function togglePhotoSelection(photoId) {
+    if (state.selectedPhotos.has(photoId)) {
+        state.selectedPhotos.delete(photoId);
+    } else {
+        state.selectedPhotos.add(photoId);
+    }
+    if (state.selectedPhotos.size === 0) {
+        state.selectionMode = false;
+    }
+    document.body.classList.toggle('selection-active', state.selectionMode);
+}
+
+function clearSelection() {
+    state.selectedPhotos.clear();
+    state.selectionMode = false;
+    document.body.classList.remove('selection-active');
+    render();
+}
+
+/** Update selection UI in-place — no full re-render, no flicker */
+function updateSelectionUI(photoId) {
+    const isSelected = state.selectedPhotos.has(photoId);
+
+    // Update the photo tile
+    const item = document.querySelector(`.photo-item[data-photo-id="${photoId}"]`);
+    if (item) {
+        item.classList.toggle('selected', isSelected);
+        const check = item.querySelector('.photo-select-check');
+        if (check) {
+            check.innerHTML = isSelected ? '<i class="fa-solid fa-check"></i>' : '';
+        }
+    }
+
+    // Update toolbar count
+    const countEl = document.querySelector('.selection-toolbar-count');
+    if (countEl) {
+        const n = state.selectedPhotos.size;
+        countEl.textContent = `${n} selected`;
+    }
+
+    // Show/hide toolbar
+    const toolbar = document.querySelector('.selection-toolbar');
+    if (toolbar) {
+        toolbar.classList.toggle('visible', state.selectionMode && state.selectedPhotos.size > 0);
+    }
+
+    // If nothing selected, clear and do a full render to hide the toolbar/overlays
+    if (state.selectedPhotos.size === 0) {
+        clearSelection();
+    }
+}
+
+function SelectionToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'selection-toolbar' + (state.selectionMode && state.selectedPhotos.size > 0 ? ' visible' : '');
+
+    const count = state.selectedPhotos.size;
+    const countEl = document.createElement('span');
+    countEl.className = 'selection-toolbar-count';
+    countEl.textContent = `${count} selected`;
+    toolbar.appendChild(countEl);
+
+    const divider = document.createElement('div');
+    divider.className = 'selection-toolbar-divider';
+    toolbar.appendChild(divider);
+
+    // Add to Album
+    const albumBtn = document.createElement('button');
+    albumBtn.className = 'sel-btn sel-btn-album';
+    albumBtn.innerHTML = '<i class="fa-solid fa-book"></i> Add to Album';
+    albumBtn.onclick = () => {
+        const ids = [...state.selectedPhotos];
+        if (ids.length === 0) return;
+        openAddToAlbumModal(ids); // Pass ALL selected IDs
+        clearSelection();
+    };
+    toolbar.appendChild(albumBtn);
+
+    // Cancel selection
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'sel-btn sel-btn-cancel';
+    cancelBtn.innerHTML = '<i class="fa-solid fa-xmark"></i> Cancel';
+    cancelBtn.onclick = clearSelection;
+    toolbar.appendChild(cancelBtn);
+
+    return toolbar;
+}
+
 async function createAlbum(name, description = '', shouldRender = true) {
+
     try {
         const res = await fetch('/api/albums/create', {
             method: 'POST',
@@ -867,83 +963,158 @@ function Sidebar() {
     const el = document.createElement('div');
     el.className = 'sidebar';
 
-    const topSection = document.createElement('div');
-    topSection.className = 'sidebar-top';
-
+    // --- Logo / Branding Header ---
     const logo = document.createElement('div');
     logo.className = 'sidebar-logo';
-    logo.innerHTML = '<i class="fa-solid fa-camera-retro"></i><span>Photo Vault</span>';
-    topSection.appendChild(logo);
+    logo.innerHTML = `
+        <i class="fa-solid fa-camera-retro"></i>
+        <div class="sidebar-logo-text">
+            <span class="sidebar-logo-brand">Photo</span>
+            <span class="sidebar-logo-name">Vault</span>
+        </div>`;
+    el.appendChild(logo);
 
-    const nav = document.createElement('div');
-    nav.className = 'sidebar-nav';
+    const isGuest = state.user && state.user.role === 'guest';
 
-    let items = [
-        { id: 'dashboard', icon: 'fa-table-columns', label: 'Dashboard', adminOnly: false },
-        { id: 'photos', icon: 'fa-image', label: 'Photos', adminOnly: false },
-        { id: 'videos', icon: 'fa-video', label: 'Videos', adminOnly: false },
-        { id: 'screenshots', icon: 'fa-mobile-screen', label: 'Screenshots', adminOnly: false },
-        { id: 'albums', icon: 'fa-book', label: 'Albums', adminOnly: false },
-        { id: 'people', icon: 'fa-users', label: 'People', adminOnly: false },
-        { id: 'discover', icon: 'fa-compass', label: 'Discover', adminOnly: false },
-        { id: 'shared', icon: 'fa-share-nodes', label: 'Shared with Me', adminOnly: false },
-        { id: 'files', icon: 'fa-folder-tree', label: 'File Explorer', adminOnly: false },
-        { id: 'upload', icon: 'fa-cloud-arrow-up', label: 'Upload Media', adminOnly: false },
-        { id: 'search', icon: 'fa-search', label: 'Search', adminOnly: false }
-    ];
-
-    // Guests: only show photos, screenshots, videos, albums
-    if (state.user && state.user.role === 'guest') {
-        const guestTabs = ['photos', 'screenshots', 'videos', 'albums'];
-        items = items.filter(i => guestTabs.includes(i.id));
-    }
-
-    items.forEach(item => {
-        const nav = document.createElement('div');
-        nav.className = `nav-item ${state.view === item.id ? 'active' : ''}`;
-        nav.innerHTML = `<i class="fa-solid ${item.icon}"></i> ${item.label}`;
-        nav.onclick = () => {
-            state.view = item.id;
-            localStorage.setItem('activeView', item.id);
+    // Helper to add a nav item
+    const addItem = (id, icon, label) => {
+        const navItem = document.createElement('div');
+        navItem.className = `nav-item ${state.view === id ? 'active' : ''}`;
+        navItem.innerHTML = `<i class="fa-solid ${icon}"></i>${label}`;
+        navItem.onclick = () => {
+            state.view = id;
+            localStorage.setItem('activeView', id);
             state.photoSearchQuery = '';
-
-            if (item.id === 'albums') {
-                state.currentAlbum = null; // Reset album detail view
-            }
-            if (item.id === 'people') {
-                state.currentPerson = null; // Reset person detail view
-                state.personPhotos = [];
-            }
-
+            if (id === 'albums') state.currentAlbum = null;
+            if (id === 'people') { state.currentPerson = null; state.personPhotos = []; }
             refreshViewData();
             render();
         };
-        el.appendChild(nav);
-    });
+        el.appendChild(navItem);
+    };
 
-    // Logout Button
+    const addSectionHeader = (label) => {
+        const h = document.createElement('div');
+        h.className = 'sidebar-section-header';
+        h.textContent = label;
+        el.appendChild(h);
+    };
+
+    const addDivider = () => {
+        const d = document.createElement('div');
+        d.className = 'sidebar-divider';
+        el.appendChild(d);
+    };
+
+    // --- Library section ---
+    if (!isGuest) addItem('dashboard', 'fa-table-columns', 'Dashboard');
+    addItem('photos', 'fa-image', 'Photos');
+    addItem('videos', 'fa-video', 'Videos');
+    addItem('screenshots', 'fa-mobile-screen', 'Screenshots');
+    addItem('search', 'fa-search', 'Search');
+
+    // --- Collections section ---
+    if (!isGuest) {
+        addDivider();
+        addSectionHeader('Collections');
+        addItem('albums', 'fa-book', 'Albums');
+        addItem('people', 'fa-users', 'People');
+        addItem('discover', 'fa-compass', 'Discover');
+        addItem('shared', 'fa-share-nodes', 'Shared with Me');
+
+        addDivider();
+        addSectionHeader('Manage');
+        addItem('files', 'fa-folder-tree', 'File Explorer');
+        addItem('upload', 'fa-cloud-arrow-up', 'Upload Media');
+    } else {
+        addDivider();
+        addItem('albums', 'fa-book', 'Albums');
+    }
+
+    // --- User Card + Storage + Logout at bottom ---
+    const bottomSection = document.createElement('div');
+    bottomSection.className = 'sidebar-user-card';
+
+    if (state.user) {
+        const email = state.user.userid || '';
+        const namePart = email.split('@')[0];
+        const initials = namePart.split(/[._-]/).map(w => w[0]?.toUpperCase() || '').join('').slice(0, 2) || email[0]?.toUpperCase() || '?';
+        const displayName = namePart.replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const role = state.user.role === 'guest' ? 'Guest' : 'Member';
+
+        const userCard = document.createElement('div');
+        userCard.className = 'user-card';
+        userCard.innerHTML = `
+            <div class="user-avatar">${initials}</div>
+            <div class="user-info">
+                <div class="user-name">${displayName}</div>
+                <div class="user-role">${role}</div>
+            </div>`;
+        bottomSection.appendChild(userCard);
+
+        // Storage bar — shows dashboard stats if available
+        if (!isGuest) {
+            const stats = state.dashboardStats;
+            const usedBytes = stats?.storage?.used_bytes ?? null;
+            const usedGb = usedBytes != null ? usedBytes / (1024 ** 3) : null;
+
+            const storageWrap = document.createElement('div');
+            storageWrap.className = 'storage-bar-wrap';
+            const usedText = usedGb != null ? `${usedGb.toFixed(2)} GB used` : 'Calculating storage…';
+            const fillPct = usedGb != null ? Math.min(100, (usedGb / 2) * 100) : 0; // assume 2TB / 2000GB limit roughly, or just pass a percentage if we had total. Assuming 2TB for now based on mockup.
+            storageWrap.innerHTML = `
+                <div class="storage-bar-label">${usedText}</div>
+                <div class="storage-bar-track">
+                    <div class="storage-bar-fill" style="width:${fillPct}%"></div>
+                </div>`;
+            bottomSection.appendChild(storageWrap);
+        }
+
+    }
+
     const logoutBtn = document.createElement('div');
-    logoutBtn.className = 'nav-item logout-btn'; // Add a class for specific styling
-    logoutBtn.innerHTML = `<i class="fa-solid fa-sign-out-alt"></i> Logout`;
+    logoutBtn.className = 'nav-item logout-btn';
+    logoutBtn.innerHTML = `<i class="fa-solid fa-arrow-right-from-bracket"></i>Sign Out`;
     logoutBtn.onclick = logout;
+    bottomSection.appendChild(logoutBtn);
 
-    // Add spacer or style to push to bottom if flex container
-    // Assuming sidebar is flex column, we can use margin-top: auto on this button
-    logoutBtn.style.marginTop = 'auto'; // Push to bottom
-    el.appendChild(logoutBtn);
-
+    el.appendChild(bottomSection);
     return el;
 }
 
-async function logout() {
-    if (!confirm('Are you sure you want to log out?')) return;
-    try {
-        await fetch('/api/logout', { method: 'POST' });
-        window.location.reload(); // Reload to clear state and show login
-    } catch (e) {
-        console.error(e);
-        window.location.reload();
-    }
+function logout() {
+    const modalOverlay = document.createElement('div');
+    modalOverlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.2s;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:#1a1a1c;border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:32px;width:340px;text-align:center;box-shadow:0 16px 40px rgba(0,0,0,0.4);transform:scale(0.95);animation:scaleUp 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;';
+
+    modal.innerHTML = `
+        <div style="background:rgba(255,59,48,0.15);width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;">
+            <i class="fa-solid fa-arrow-right-from-bracket" style="font-size:28px;color:#ff3b30;"></i>
+        </div>
+        <h3 style="margin:0 0 10px;font-size:20px;font-weight:600;color:#fff;">Sign Out</h3>
+        <p style="margin:0 0 28px;color:rgba(255,255,255,0.6);font-size:15px;">Are you sure you want to sign out of PhotoVault?</p>
+        <div style="display:flex;gap:12px;">
+            <button id="logoutCancel" style="flex:1;padding:12px;border-radius:12px;border:none;background:rgba(255,255,255,0.1);color:#fff;font-weight:600;font-size:15px;cursor:pointer;transition:background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.15)'" onmouseout="this.style.background='rgba(255,255,255,0.1)'">Cancel</button>
+            <button id="logoutConfirm" style="flex:1;padding:12px;border-radius:12px;border:none;background:#ff3b30;color:#fff;font-weight:600;font-size:15px;cursor:pointer;transition:background 0.2s;" onmouseover="this.style.background='#ff1a0d'" onmouseout="this.style.background='#ff3b30'">Sign Out</button>
+        </div>
+    `;
+
+    modalOverlay.appendChild(modal);
+    document.body.appendChild(modalOverlay);
+
+    modal.querySelector('#logoutCancel').onclick = () => modalOverlay.remove();
+    modal.querySelector('#logoutConfirm').onclick = async () => {
+        modal.querySelector('#logoutConfirm').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        try {
+            await fetch('/api/logout', { method: 'POST' });
+            window.location.reload(); // Reload to clear state and show login
+        } catch (e) {
+            console.error(e);
+            window.location.reload();
+        }
+    };
 }
 
 function PeopleGallery() {
@@ -1103,38 +1274,54 @@ function SearchInterface() {
     const controls = document.createElement('div');
     controls.className = 'search-controls';
 
-    // People Select
-    const peopleSelect = document.createElement('div');
-    peopleSelect.className = 'search-people-select';
-    peopleSelect.innerHTML = `<h4>With People:</h4>`;
-    const peopleList = document.createElement('div');
-    peopleList.className = 'people-chips';
-
-    state.people.forEach(p => {
-        const chip = document.createElement('div');
-        chip.className = `person-chip ${state.searchPersonIds.includes(p.id) ? 'selected' : ''}`;
-        chip.innerText = p.name;
-        chip.onclick = () => {
-            if (state.searchPersonIds.includes(p.id)) {
-                state.searchPersonIds = state.searchPersonIds.filter(id => id !== p.id);
-            } else {
-                state.searchPersonIds.push(p.id);
-            }
-            render(); // Re-render to update selection style
-        };
-        peopleList.appendChild(chip);
-    });
-    peopleSelect.appendChild(peopleList);
-    controls.appendChild(peopleSelect);
-
-    // Text Search
+    // Text Search Bar (Large Pill)
     const searchBox = document.createElement('div');
-    searchBox.className = 'search-box-row';
+    searchBox.className = 'search-box-large';
     searchBox.innerHTML = `
-        <input type="text" id="searchInput" placeholder="Search by description..." value="${state.searchQuery}">
-        <button id="doSearchBtn">Search</button>
+        <i class="fa-solid fa-magnifying-glass search-icon-large"></i>
+        <input type="text" id="searchInput" placeholder="Search your photos by description, location, or objects..." value="${state.searchQuery}">
+        <button id="doSearchBtn" class="search-btn-large">Search</button>
     `;
     controls.appendChild(searchBox);
+
+    // People Select (Horizontal scroll)
+    if (state.people && state.people.length > 0) {
+        const peopleSelect = document.createElement('div');
+        peopleSelect.className = 'search-people-select';
+        peopleSelect.innerHTML = `<h4 class="search-section-title">Filter by People</h4>`;
+
+        const peopleList = document.createElement('div');
+        peopleList.className = 'people-chips people-chips-scrollable';
+
+        // Sort: Named people first, Unknowns later
+        const sortedPeople = [...state.people].sort((a, b) => {
+            if (a.name === 'Unknown' && b.name !== 'Unknown') return 1;
+            if (a.name !== 'Unknown' && b.name === 'Unknown') return -1;
+            return a.name.localeCompare(b.name);
+        });
+
+        sortedPeople.forEach(p => {
+            const chip = document.createElement('div');
+            // Give 'Unknown' a slightly different style if needed, or just normal chip
+            chip.className = `person-chip ${state.searchPersonIds.includes(p.id) ? 'selected' : ''} ${p.name === 'Unknown' ? 'unknown-chip' : ''}`;
+
+            // Add an avatar circle for the chip
+            const initial = p.name === 'Unknown' ? '?' : p.name.charAt(0).toUpperCase();
+            chip.innerHTML = `<div class="person-chip-avatar">${initial}</div><span>${p.name}</span>`;
+
+            chip.onclick = () => {
+                if (state.searchPersonIds.includes(p.id)) {
+                    state.searchPersonIds = state.searchPersonIds.filter(id => id !== p.id);
+                } else {
+                    state.searchPersonIds.push(p.id);
+                }
+                render(); // Re-render to update selection style
+            };
+            peopleList.appendChild(chip);
+        });
+        peopleSelect.appendChild(peopleList);
+        controls.appendChild(peopleSelect);
+    }
 
     container.appendChild(controls);
 
@@ -1153,6 +1340,11 @@ function SearchInterface() {
                     runSearch();
                 }
             };
+            // Retain focus
+            if (state.searchQuery) {
+                inp.focus();
+                inp.setSelectionRange(inp.value.length, inp.value.length);
+            }
         }
     }, 0);
 
@@ -1717,9 +1909,27 @@ function TimelineView() {
 
         group.photos.forEach(photo => {
             const item = document.createElement('div');
-            item.className = 'photo-item';
+            item.className = 'photo-item' + (state.selectedPhotos.has(photo.id) ? ' selected' : '');
 
-            // Add Album Button
+            // Hover overlay: gradient top/bottom + selection check + date label
+            const overlay = document.createElement('div');
+            overlay.className = 'photo-item-overlay';
+
+            const selectCheck = document.createElement('div');
+            selectCheck.className = 'photo-select-check';
+            selectCheck.innerHTML = state.selectedPhotos.has(photo.id) ? '<i class="fa-solid fa-check"></i>' : '';
+            overlay.appendChild(selectCheck);
+
+            const dateLabel = document.createElement('div');
+            dateLabel.className = 'photo-item-date';
+            if (photo.date_taken) {
+                const d = new Date(photo.date_taken);
+                dateLabel.textContent = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            }
+            overlay.appendChild(dateLabel);
+            item.appendChild(overlay);
+
+            // Add Album Button (hidden until hover, handled by existing CSS)
             const albumBtn = document.createElement('button');
             albumBtn.className = 'album-btn';
             albumBtn.title = 'Add to Album';
@@ -1744,24 +1954,53 @@ function TimelineView() {
             img.onload = () => img.classList.add('loaded');
             item.appendChild(img);
 
+            // Tag the element so updateSelectionUI can find it
+            item.dataset.photoId = photo.id;
+
+            // Long-press to enter selection mode (mobile)
+            let pressTimer = null;
+            item.addEventListener('pointerdown', () => {
+                pressTimer = setTimeout(() => {
+                    pressTimer = null;
+                    state.selectionMode = true;
+                    togglePhotoSelection(photo.id);
+                    render(); // Full render only on first entry (shows toolbar + overlays)
+                }, 500);
+            });
+            item.addEventListener('pointerup', () => { if (pressTimer) clearTimeout(pressTimer); });
+            item.addEventListener('pointermove', () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } });
+
+            // Selection check click — no full render, just update DOM in-place
+            selectCheck.addEventListener('click', (e) => {
+                e.stopPropagation();
+                state.selectionMode = true;
+                togglePhotoSelection(photo.id);
+                updateSelectionUI(photo.id);
+            });
+
             item.onclick = () => {
+                if (state.selectionMode) {
+                    togglePhotoSelection(photo.id);
+                    updateSelectionUI(photo.id);
+                    return;
+                }
                 // Save scroll position before opening viewer
                 const contentArea = document.querySelector('.content-area');
                 if (contentArea) {
                     state.savedScrollPosition = contentArea.scrollTop;
                 }
-
                 // Flatten timeline groups for viewer list
                 const allPhotos = state.timelineGroups.flatMap(g => g.photos);
                 state.viewerList = allPhotos;
                 state.viewerIndex = allPhotos.findIndex(p => p.id === photo.id);
-
-                state.viewerImage = { src: photo.image_url, type: photo.type };
+                state.viewerImage = { src: photo.image_url, type: photo.type, ...photo };
                 render();
             };
 
+
             grid.appendChild(item);
         });
+
 
         section.appendChild(grid);
         container.appendChild(section);
@@ -2351,6 +2590,68 @@ function handleMouseUp() {
     if (media) media.style.cursor = 'grab';
 }
 
+// --- Pinch-to-zoom & touch pan for mobile lightbox ---
+
+let _pinchStartDist = null;
+let _pinchStartZoom = null;
+let _touchStartX = null;
+let _touchStartY = null;
+let _touchStartPanX = null;
+let _touchStartPanY = null;
+
+function getTouchDist(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function handleLightboxTouchStart(e) {
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        _pinchStartDist = getTouchDist(e.touches);
+        _pinchStartZoom = state.zoomLevel;
+    } else if (e.touches.length === 1) {
+        _touchStartX = e.touches[0].clientX;
+        _touchStartY = e.touches[0].clientY;
+        _touchStartPanX = state.panX;
+        _touchStartPanY = state.panY;
+    }
+}
+
+function handleLightboxTouchMove(e) {
+    if (e.touches.length === 2 && _pinchStartDist !== null) {
+        e.preventDefault();
+        const dist = getTouchDist(e.touches);
+        let newZoom = Math.round(_pinchStartZoom * (dist / _pinchStartDist));
+        newZoom = Math.max(20, Math.min(500, newZoom));
+        state.zoomLevel = newZoom;
+        updateZoomUI(newZoom);
+        updateViewerTransform();
+    } else if (e.touches.length === 1 && _touchStartX !== null && state.zoomLevel > 100) {
+        e.preventDefault();
+        state.panX = _touchStartPanX + (e.touches[0].clientX - _touchStartX);
+        state.panY = _touchStartPanY + (e.touches[0].clientY - _touchStartY);
+        updateViewerTransform();
+    }
+}
+
+function handleLightboxTouchEnd(e) {
+    if (e.touches.length < 2) {
+        _pinchStartDist = null;
+        _pinchStartZoom = null;
+    }
+    if (e.touches.length === 0) {
+        _touchStartX = null;
+        _touchStartY = null;
+    }
+}
+
+function attachLightboxTouchHandlers(el) {
+    el.addEventListener('touchstart', handleLightboxTouchStart, { passive: false });
+    el.addEventListener('touchmove', handleLightboxTouchMove, { passive: false });
+    el.addEventListener('touchend', handleLightboxTouchEnd, { passive: true });
+}
+
 function updateZoomUI(val) {
     const zoomValEl = document.getElementById('zoomValue');
     const rangeInput = document.querySelector('.zoom-slider');
@@ -2554,9 +2855,11 @@ function MediaViewer() {
         }
     };
 
+    // Attach touch handlers for pinch-to-zoom and touch pan on mobile
+    attachLightboxTouchHandlers(el);
+
     return el;
 }
-
 function navigateViewer(direction) {
     if (!state.viewerList || state.viewerList.length <= 1) return;
 
@@ -2879,29 +3182,25 @@ function ContentArea() {
 function UploadView() {
     const container = document.createElement('div');
     container.className = 'upload-view-content';
-    container.style.padding = '20px';
+    container.style.padding = '24px';
     container.style.display = 'flex';
     container.style.flexDirection = 'column';
-    container.style.gap = '20px';
+    container.style.gap = '24px';
     container.style.height = '100%';
+    container.style.maxWidth = '900px';
+    container.style.margin = '0 auto';
+    container.style.width = '100%';
 
     // Dropzone Area
     const dropzone = document.createElement('div');
     dropzone.className = 'upload-dropzone';
-    dropzone.style.border = '2px dashed var(--border-color)';
-    dropzone.style.borderRadius = '12px';
-    dropzone.style.padding = '60px 20px';
-    dropzone.style.textAlign = 'center';
-    dropzone.style.background = 'var(--surface-1)';
-    dropzone.style.cursor = 'pointer';
-    dropzone.style.transition = 'background 0.2s, border-color 0.2s';
 
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
     dropzone.innerHTML = `
-        <i class="fa-solid fa-cloud-arrow-up" style="font-size: 48px; color: var(--accent-color); margin-bottom: 16px;"></i>
-        <h3 style="margin-bottom: 8px;">${isMobile ? 'Tap here to upload media' : 'Click or drag folders here to upload'}</h3>
-        <p style="color: var(--text-secondary); font-size: 0.9rem;">${isMobile ? 'Select photos and videos from your gallery' : 'Folders will be traversed recursively to find media files'}</p>
+        <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+        <h3>${isMobile ? 'Tap here to upload media' : 'Click or drag folders here'}</h3>
+        <p>${isMobile ? 'Select photos and videos from your gallery' : 'Folders will be automatically scanned for media'}</p>
     `;
 
     // Hidden file input to allow selecting folders manually via browsing
@@ -2927,14 +3226,12 @@ function UploadView() {
     // Handle drag on the dedicated dropzone
     dropzone.addEventListener('dragenter', (e) => {
         e.preventDefault();
-        dropzone.style.borderColor = 'var(--accent-color)';
-        dropzone.style.background = 'rgba(10, 132, 255, 0.05)';
+        dropzone.classList.add('drag-active');
     });
 
     dropzone.addEventListener('dragleave', (e) => {
         e.preventDefault();
-        dropzone.style.borderColor = 'var(--border-color)';
-        dropzone.style.background = 'var(--surface-1)';
+        dropzone.classList.remove('drag-active');
     });
 
     dropzone.addEventListener('dragover', (e) => {
@@ -2943,8 +3240,7 @@ function UploadView() {
 
     dropzone.addEventListener('drop', (e) => {
         e.preventDefault();
-        dropzone.style.borderColor = 'var(--border-color)';
-        dropzone.style.background = 'var(--surface-1)';
+        dropzone.classList.remove('drag-active');
 
         if (!state.user || state.user.role === 'guest') return;
         uploadManager.handleDropEvent(e);
@@ -2953,39 +3249,29 @@ function UploadView() {
     container.appendChild(fileInput);
     container.appendChild(dropzone);
 
-    // Status Table Wrapper
-    const tableWrapper = document.createElement('div');
-    tableWrapper.style.flex = '1';
-    tableWrapper.style.overflowY = 'auto';
-    tableWrapper.style.background = 'var(--surface-1)';
-    tableWrapper.style.borderRadius = '12px';
-    tableWrapper.style.border = '1px solid var(--border-color)';
-    tableWrapper.style.display = 'flex';
-    tableWrapper.style.flexDirection = 'column';
-    tableWrapper.innerHTML = `
-        <div style="padding: 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
-            <div style="font-weight: 600;">Upload Status</div>
-            <div id="uploadTabHeaderStatus" style="font-size: 0.85rem; color: var(--text-secondary);"></div>
+    // Status Area Wrapper
+    const statusCard = document.createElement('div');
+    statusCard.className = 'upload-status-card';
+    statusCard.innerHTML = `
+        <div class="upload-status-header">
+            <h4>Upload progress</h4>
+            <div id="uploadTabHeaderStatus" class="upload-status-subtitle"></div>
         </div>
-        <div style="flex: 1; overflow-y: auto;">
-            <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                <thead style="position: sticky; top: 0; background: var(--surface-1); z-index: 10;">
-                    <tr style="border-bottom: 1px solid var(--border-color);">
-                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 40px;"></th>
-                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem;">File Name</th>
-                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 120px;">Status</th>
-                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 150px;">Progress</th>
-                    </tr>
-                </thead>
-                <tbody id="uploadTabTableBody">
-                    <tr><td colspan="4" style="text-align: center; padding: 30px; color: var(--text-secondary);">No uploads active</td></tr>
-                </tbody>
-            </table>
+        
+        <div class="upload-list-header">
+            <div class="col-icon"></div>
+            <div class="col-name">File Name</div>
+            <div class="col-status">Status</div>
+            <div class="col-progress">Progress</div>
+        </div>
+        
+        <div id="uploadTabTableBody" class="upload-list-body">
+            <div class="upload-list-empty">No active uploads</div>
         </div>
     `;
-    container.appendChild(tableWrapper);
+    container.appendChild(statusCard);
 
-    // Tell upload manager to bind to this table
+    // Tell upload manager to bind to this list
     setTimeout(() => {
         uploadManager.bindToTabTable();
     }, 0);
@@ -2999,6 +3285,7 @@ function App() {
     div.appendChild(Sidebar());
     div.appendChild(ContentArea());
     div.appendChild(MediaViewer());
+    div.appendChild(SelectionToolbar());
     return div;
 }
 
@@ -3034,12 +3321,20 @@ function render() {
 
 // Global Inputs
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.viewerImage) {
+    if (!state.viewerImage) return;
+
+    if (e.key === 'Escape') {
         state.viewerImage = null;
         state.zoomLevel = 100;
         state.panX = 0;
         state.panY = 0;
         render();
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        navigateViewer(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        navigateViewer(-1);
     }
 });
 
