@@ -381,6 +381,37 @@ body {
     word-break: break-word;
 }
 
+.lightbox-mobile-btn {
+    display: none;
+    /* Only visible on mobile */
+    position: absolute;
+    top: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    cursor: pointer;
+    z-index: 2000;
+    backdrop-filter: blur(4px);
+    transition: background 0.2s;
+}
+
+.lightbox-mobile-btn:hover {
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.lightbox-btn-close {
+    left: 16px;
+}
+
+.lightbox-btn-info {
+    right: 16px;
+}
 
 .close-help {
     position: absolute;
@@ -490,9 +521,11 @@ body {
 
 .fe-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 16px;
-    padding-top: 16px;
+    /* Increase min width for bigger thumbnails */
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 32px;
+    /* Increase gap for more breathing room */
+    padding-top: 24px;
     border-top: 1px solid var(--border-color);
 }
 
@@ -562,62 +595,107 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 10px;
-    border-radius: 8px;
+    padding: 16px;
+    /* give more padding */
+    border-radius: 12px;
+    /* slightly rounder corners */
     cursor: pointer;
     position: relative;
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba(255, 255, 255, 0.02);
+    /* slightly fainter background */
+    border: 1px solid transparent;
+    /* Prepare for hover border */
+    transition: all 0.2s ease;
+    /* Smooth hover transitions */
+    overflow: hidden;
+    /* Ensure contents don't bleed out */
 }
 
 .fe-card:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transform: translateY(-2px);
+    /* Slight lift effect */
 }
 
 .fe-card.selected {
-    background: rgba(10, 132, 255, 0.15);
+    background: rgba(10, 132, 255, 0.1);
     box-shadow: 0 0 0 2px var(--accent-color) inset;
+    border-color: transparent;
 }
 
 .fe-card-icon {
-    width: 60px;
-    height: 60px;
+    width: 90px;
+    /* Increase icon/thumbnail container size */
+    height: 90px;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
+    /* More space between icon and text */
+}
+
+.fe-card-icon img {
+    /* Optional: Ensure image fits nicely within larger area if it's a thumbnail */
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
 .fe-card-name {
-    font-size: 13px;
+    font-size: 14px;
+    /* slightly larger text */
+    font-weight: 500;
     text-align: center;
     width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-secondary);
+    /* allow names to wrap up to 2 lines */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    line-height: 1.3;
+    color: var(--text-primary);
+    /* brighter text */
 }
 
 .fe-checkbox-overlay {
     position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 22px;
-    height: 22px;
-    background: rgba(0, 0, 0, 0.5);
-    border: 2px solid rgba(255, 255, 255, 0.7);
-    border-radius: 50%;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.5) 0%, transparent 50px);
+    border-radius: 12px;
+    opacity: 0;
+    transition: opacity 0.2s;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
+    align-items: flex-start;
+    padding: 8px;
+    pointer-events: none;
+}
+
+.fe-card:hover .fe-checkbox-overlay,
+.fe-card.selected .fe-checkbox-overlay {
+    opacity: 1;
+}
+
+.fe-card .fe-checkbox {
+    pointer-events: auto;
+    margin: 0;
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.7);
     color: transparent;
-    font-size: 12px;
 }
 
-.fe-checkbox-overlay:hover {
-    background: rgba(0, 0, 0, 0.7);
+.fe-card .fe-checkbox:hover {
+    background: rgba(0, 0, 0, 0.6);
+    border-color: white;
 }
 
-.fe-checkbox-overlay.checked {
+.fe-card .fe-checkbox.checked {
     background: var(--accent-color);
     border-color: var(--accent-color);
     color: white;
@@ -1221,13 +1299,29 @@ search-box-row button {
         flex-direction: row;
         border-right: none;
         border-top: 1px solid var(--border-color);
-        padding: 10px 20px;
-        justify-content: space-around;
+        padding: 8px 10px;
+        justify-content: flex-start;
+        /* Instead of space-around, allow scrolling */
+        overflow-x: auto;
+        /* Enable horizontal scrolling */
+        overflow-y: hidden;
+        white-space: nowrap;
+        /* Prevent items from wrapping */
         z-index: 100;
         background-color: rgba(30, 30, 30, 0.98);
-        /* Less transparent for bottom bar */
-        padding-bottom: env(safe-area-inset-bottom, 20px);
-        /* Handle iPhone Home Indicator */
+        padding-bottom: env(safe-area-inset-bottom, 12px);
+        /* Tighter bottom padding */
+
+        /* Hide scrollbar for cleaner look */
+        scrollbar-width: none;
+        /* Firefox */
+        -ms-overflow-style: none;
+        /* IE/Edge */
+    }
+
+    .sidebar::-webkit-scrollbar {
+        display: none;
+        /* Chrome/Safari/Opera */
     }
 
     .sidebar-title {
@@ -1237,22 +1331,31 @@ search-box-row button {
     .nav-item {
         flex-direction: column;
         margin-bottom: 0;
-        padding: 8px;
+        margin-right: 4px;
+        /* Space between scrolling items */
+        padding: 6px 10px;
+        /* Tighter padding */
         font-size: 10px;
         text-align: center;
         background: transparent !important;
-        /* Remove hover bg on mobile to avoid sticky hover states */
+        flex: 0 0 auto;
+        /* Prevent items from shrinking */
+        min-width: 65px;
+        /* Ensure touch targets are wide enough */
     }
 
     .logout-btn {
         margin-top: 0 !important;
         color: #ff3b30;
-        /* Make it red on mobile too? Or just standard? */
-        /* Let's keep standard color but allow hover state if tapped */
+        margin-left: auto;
+        /* Push logout to the far right if there's space, or just keep it at the end of the scroll */
     }
 
     .nav-item.active {
         color: var(--accent-color);
+        background: rgba(255, 255, 255, 0.05) !important;
+        /* Slight background for active item on mobile */
+        border-radius: 8px;
     }
 
     .nav-item.active i {
@@ -1262,7 +1365,8 @@ search-box-row button {
     .nav-item i {
         margin-right: 0;
         margin-bottom: 4px;
-        font-size: 20px;
+        font-size: 18px;
+        /* Slightly smaller icons */
         display: block;
     }
 
@@ -1281,34 +1385,76 @@ search-box-row button {
         font-size: 24px;
     }
 
-    /* Photo Grid */
-    .photo-grid {
-        /* Smaller thumbnails on mobile, e.g., 3 per row (screen width / 3 approx 100-120px) */
-        grid-template-columns: repeat(auto-fill, minmax(105px, 1fr));
-        gap: 2px;
-        /* Tighter gap like native apps */
+    /* Photo Grid & Timeline Grid */
+    .photo-grid,
+    .timeline-grid,
+    .memory-preview {
+        /* Even smaller thumbnails on mobile to allow 4-5 per row */
+        grid-template-columns: repeat(auto-fill, minmax(75px, 1fr));
+        gap: 4px;
+        /* Slightly more gap as requested */
     }
 
     .photo-item {
-        border-radius: 0;
-        /* Square look or slight radius? Native uses square with tiny gap */
+        border-radius: 6px;
+        /* A bit of rounded corners as requested */
+    }
+
+    /* File Explorer Grid */
+    .fe-grid {
+        grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+        gap: 12px;
+        padding-top: 12px;
+    }
+
+    .fe-card {
+        padding: 8px;
+    }
+
+    .fe-card-icon {
+        width: 70px;
+        height: 70px;
+        margin-bottom: 6px;
     }
 
     /* Lightbox */
     .lightbox img {
         max-width: 100%;
-        max-height: 80%;
-        /* Leave room for close button if needed, although it overlays */
+        max-height: 100%;
+        /* Let it fill the screen on mobile */
     }
 
-    .close-help {
-        top: auto;
-        bottom: 100px;
-        /* Position above nav bar area if visible, or just safely bottom */
-        right: 50%;
-        transform: translateX(50%);
-        background: rgba(0, 0, 0, 0.6);
-        backdrop-filter: blur(4px);
+    .lightbox-mobile-btn {
+        display: flex;
+    }
+
+    .lightbox-content {
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        gap: 0;
+    }
+
+    .lightbox-sidebar {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 60%;
+        max-height: 60%;
+        border-radius: 20px 20px 0 0;
+        transform: translateY(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        z-index: 1500;
+        padding-bottom: env(safe-area-inset-bottom, 20px);
+    }
+
+    .lightbox-sidebar.active-mobile {
+        transform: translateY(0);
+    }
+
+    .hide-on-mobile {
+        display: none !important;
     }
 }
 

@@ -866,22 +866,34 @@ function LoginScreen() {
 function Sidebar() {
     const el = document.createElement('div');
     el.className = 'sidebar';
-    el.innerHTML = `<div class="sidebar-title">Library</div>`;
 
-    const allItems = [
-        { id: 'dashboard', icon: 'fa-gauge-high', label: 'Dashboard' },
-        { id: 'files', icon: 'fa-folder', label: 'Files' },
-        { id: 'photos', icon: 'fa-images', label: 'Photos' },
-        { id: 'screenshots', icon: 'fa-mobile-screen', label: 'Screenshots' },
-        { id: 'videos', icon: 'fa-video', label: 'Videos' },
-        { id: 'albums', icon: 'fa-book', label: 'Albums' },
-        { id: 'shared', icon: 'fa-share-nodes', label: 'Shared with me' },
-        { id: 'people', icon: 'fa-users', label: 'People' },
-        { id: 'discover', icon: 'fa-sparkles', label: 'Discover' }
+    const topSection = document.createElement('div');
+    topSection.className = 'sidebar-top';
+
+    const logo = document.createElement('div');
+    logo.className = 'sidebar-logo';
+    logo.innerHTML = '<i class="fa-solid fa-camera-retro"></i><span>Photo Vault</span>';
+    topSection.appendChild(logo);
+
+    const nav = document.createElement('div');
+    nav.className = 'sidebar-nav';
+
+    const items = [
+        { id: 'dashboard', icon: 'fa-table-columns', label: 'Dashboard', adminOnly: false },
+        { id: 'photos', icon: 'fa-image', label: 'Photos', adminOnly: false },
+        { id: 'videos', icon: 'fa-video', label: 'Videos', adminOnly: false },
+        { id: 'screenshots', icon: 'fa-mobile-screen', label: 'Screenshots', adminOnly: false },
+        { id: 'albums', icon: 'fa-book', label: 'Albums', adminOnly: false },
+        { id: 'people', icon: 'fa-users', label: 'People', adminOnly: false },
+        { id: 'discover', icon: 'fa-compass', label: 'Discover', adminOnly: false },
+        { id: 'shared', icon: 'fa-share-nodes', label: 'Shared with Me', adminOnly: false },
+        { id: 'files', icon: 'fa-folder-tree', label: 'File Explorer', adminOnly: false },
+        { id: 'upload', icon: 'fa-cloud-arrow-up', label: 'Upload Media', adminOnly: false },
+        { id: 'search', icon: 'fa-search', label: 'Search', adminOnly: false }
     ];
 
-    let items = allItems;
     // Guests: only show photos, screenshots, videos, albums
+    let filteredItems = items;
     if (state.user && state.user.role === 'guest') {
         const guestTabs = ['photos', 'screenshots', 'videos', 'albums'];
         items = allItems.filter(i => guestTabs.includes(i.id));
@@ -1459,10 +1471,10 @@ function FileExplorer() {
                         }
 
                         const thumbSrc = `/resource/thumbnail/${state.user.userid}/${thumbName}`;
-                        contentHTML = `<img src="${thumbSrc}" loading="lazy" onload="this.classList.add('loaded')" class="grid-thumb" style="width:100%; height:100%; object-fit: cover; border-radius: 6px;">`;
+                        contentHTML = `<div class="fe-card-icon"><img src="${thumbSrc}" loading="lazy" onload="this.classList.add('loaded')" class="grid-thumb" style="width:100%; height:100%; object-fit: cover;"></div>`;
 
                         if (!isImage) {
-                            contentHTML += '<div class="play-icon-overlay" style="width:30px;height:30px;font-size:16px;"><i class="fa-solid fa-play"></i></div>';
+                            contentHTML = `<div class="fe-card-icon"><img src="${thumbSrc}" loading="lazy" onload="this.classList.add('loaded')" class="grid-thumb" style="width:100%; height:100%; object-fit: cover;"><div class="play-icon-overlay" style="width:30px;height:30px;font-size:16px;"><i class="fa-solid fa-play"></i></div></div>`;
                         }
                     }
                 }
@@ -1471,13 +1483,15 @@ function FileExplorer() {
             if (!contentHTML) {
                 const iconClass = isDir ? 'fa-folder' : (isImage ? 'fa-image' : 'fa-file');
                 const iconColor = isDir ? '#0a84ff' : '#a1a1a6';
-                contentHTML = `<div class="grid-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}; font-size: 48px;"></i></div>`;
+                contentHTML = `<div class="fe-card-icon"><i class="fa-solid ${iconClass}" style="color: ${iconColor}; font-size: 56px;"></i></div>`;
             }
 
             el.innerHTML = `
-                <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                <div class="fe-checkbox-overlay">
+                    <div class="fe-checkbox ${state.selectedFiles.has(item.name) ? 'checked' : ''}"><i class="fa-solid fa-check"></i></div>
+                </div>
                 ${contentHTML}
-                <div class="grid-name">${item.name}</div>
+                <div class="fe-card-name" title="${item.name}">${item.name}</div>
             `;
 
             const checkbox = el.querySelector('.fe-checkbox');
@@ -2445,16 +2459,18 @@ function MediaViewer() {
     }
 
     el.innerHTML = `
+        <button class="lightbox-mobile-btn lightbox-btn-close" id="lbCloseBtn" title="Close"><i class="fa-solid fa-xmark"></i></button>
+        <button class="lightbox-mobile-btn lightbox-btn-info" id="lbInfoBtn" title="Info"><i class="fa-solid fa-circle-info"></i></button>
         <div class="lightbox-content">
             <div class="lightbox-media" id="mediaContainer">
                  ${mediaContent}
                  ${navControls}
             </div>
-            <div class="lightbox-sidebar" onclick="event.stopPropagation()">
+            <div class="lightbox-sidebar" id="lbSidebar" onclick="event.stopPropagation()">
                 ${metaContent}
             </div>
         </div>
-        <div class="close-help">Press ESC to close</div>
+        <div class="close-help hide-on-mobile">Press ESC to close</div>
     `;
 
     // Event Listeners for Interaction
@@ -2492,6 +2508,30 @@ function MediaViewer() {
                 rightBtn.onclick = (e) => {
                     e.stopPropagation();
                     navigateViewer(1);
+                };
+            }
+
+            // Mobile Buttons Listeners
+            const closeBtn = el.querySelector('#lbCloseBtn');
+            if (closeBtn) {
+                closeBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    state.viewerImage = null;
+                    state.viewerList = [];
+                    state.viewerIndex = -1;
+                    currentMetadata = null;
+                    state.zoomLevel = 100;
+                    state.panX = 0;
+                    state.panY = 0;
+                    render();
+                };
+            }
+            const infoBtn = el.querySelector('#lbInfoBtn');
+            if (infoBtn) {
+                infoBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const sidebar = el.querySelector('#lbSidebar');
+                    if (sidebar) sidebar.classList.toggle('active-mobile');
                 };
             }
         }
@@ -2828,11 +2868,124 @@ function ContentArea() {
         el.appendChild(AlbumsView());
     } else if (state.view === 'shared') {
         el.appendChild(SharedView());
+    } else if (state.view === 'upload') {
+        el.appendChild(UploadView());
     } else {
         el.innerHTML = `<div style="padding:20px; color:var(--text-secondary)">Coming soon...</div>`;
     }
 
     return el;
+}
+
+function UploadView() {
+    const container = document.createElement('div');
+    container.className = 'upload-view-content';
+    container.style.padding = '20px';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.gap = '20px';
+    container.style.height = '100%';
+
+    // Dropzone Area
+    const dropzone = document.createElement('div');
+    dropzone.className = 'upload-dropzone';
+    dropzone.style.border = '2px dashed var(--border-color)';
+    dropzone.style.borderRadius = '12px';
+    dropzone.style.padding = '60px 20px';
+    dropzone.style.textAlign = 'center';
+    dropzone.style.background = 'var(--surface-1)';
+    dropzone.style.cursor = 'pointer';
+    dropzone.style.transition = 'background 0.2s, border-color 0.2s';
+
+    dropzone.innerHTML = `
+        <i class="fa-solid fa-cloud-arrow-up" style="font-size: 48px; color: var(--accent-color); margin-bottom: 16px;"></i>
+        <h3 style="margin-bottom: 8px;">Click or drag folders here to upload</h3>
+        <p style="color: var(--text-secondary); font-size: 0.9rem;">Folders will be traversed recursively to find media files</p>
+    `;
+
+    // Hidden file input to allow selecting folders manually via browsing
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.multiple = true;
+    fileInput.webkitdirectory = true;
+    fileInput.style.display = 'none';
+
+    fileInput.addEventListener('change', (e) => {
+        if (!state.user || state.user.role === 'guest') return;
+        uploadManager.handleFilesInput(e.target.files);
+    });
+
+    dropzone.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    // Handle drag on the dedicated dropzone
+    dropzone.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = 'var(--accent-color)';
+        dropzone.style.background = 'rgba(10, 132, 255, 0.05)';
+    });
+
+    dropzone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = 'var(--border-color)';
+        dropzone.style.background = 'var(--surface-1)';
+    });
+
+    dropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = 'var(--border-color)';
+        dropzone.style.background = 'var(--surface-1)';
+
+        if (!state.user || state.user.role === 'guest') return;
+        uploadManager.handleDropEvent(e);
+    });
+
+    container.appendChild(fileInput);
+    container.appendChild(dropzone);
+
+    // Status Table Wrapper
+    const tableWrapper = document.createElement('div');
+    tableWrapper.style.flex = '1';
+    tableWrapper.style.overflowY = 'auto';
+    tableWrapper.style.background = 'var(--surface-1)';
+    tableWrapper.style.borderRadius = '12px';
+    tableWrapper.style.border = '1px solid var(--border-color)';
+    tableWrapper.style.display = 'flex';
+    tableWrapper.style.flexDirection = 'column';
+    tableWrapper.innerHTML = `
+        <div style="padding: 16px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-weight: 600;">Upload Status</div>
+            <div id="uploadTabHeaderStatus" style="font-size: 0.85rem; color: var(--text-secondary);"></div>
+        </div>
+        <div style="flex: 1; overflow-y: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                <thead style="position: sticky; top: 0; background: var(--surface-1); z-index: 10;">
+                    <tr style="border-bottom: 1px solid var(--border-color);">
+                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 40px;"></th>
+                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem;">File Name</th>
+                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 120px;">Status</th>
+                        <th style="padding: 12px 16px; color: var(--text-secondary); font-weight: 500; font-size: 0.85rem; width: 150px;">Progress</th>
+                    </tr>
+                </thead>
+                <tbody id="uploadTabTableBody">
+                    <tr><td colspan="4" style="text-align: center; padding: 30px; color: var(--text-secondary);">No uploads active</td></tr>
+                </tbody>
+            </table>
+        </div>
+    `;
+    container.appendChild(tableWrapper);
+
+    // Tell upload manager to bind to this table
+    setTimeout(() => {
+        uploadManager.bindToTabTable();
+    }, 0);
+
+    return container;
 }
 
 function App() {

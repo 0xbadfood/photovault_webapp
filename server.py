@@ -441,6 +441,40 @@ def get_photo_metadata():
         return jsonify({'found': False, 'error': 'Metadata not found'})
 
 
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    userid = request.form.get('userid')
+    batch_id = request.form.get('upload_batch_id')
+    
+    if not userid or not batch_id:
+        return jsonify({'error': 'Missing userid or upload_batch_id'}), 400
+        
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+        
+    user_dir = get_user_dir(userid)
+    
+    # Target directory based on new requirement: ../backup/data/<user_id>/web/files/<date_time>
+    # 'batch_id' passed from frontend will act as the <date_time> folder name
+    target_dir = os.path.join(user_dir, 'web', 'files', batch_id)
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # Save the file. We use the filename directly (if flattened) or preserve path if needed, 
+    # but the frontend will send just the filename per the updated requirement.
+    safe_filename = os.path.basename(file.filename)
+    target_path = os.path.join(target_dir, safe_filename)
+    
+    try:
+        file.save(target_path)
+        return jsonify({'success': True, 'path': target_path})
+    except Exception as e:
+        print(f"Error saving upload: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # --- Dashboard API ---
 
 @app.route('/api/dashboard/stats', methods=['GET'])
