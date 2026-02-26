@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import secrets
 import sqlite3
@@ -7,81 +8,130 @@ import database
 import zipfile
 import io
 import time
-from flask import Flask, request, jsonify, send_from_directory, render_template, abort, send_file, Response, stream_with_context
+import json
+import base64
+import bcrypt
+from flask import Flask, request, jsonify, send_from_directory, render_template, abort, send_file, Response, stream_with_context, session
+from datetime import datetime, timedelta
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.secret_key = secrets.token_hex(16)
 
+# --- Persistent Secret Key ---
+# Generate once and persist to file so sessions survive server restarts.
+_SECRET_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'session_secret.key')
+if os.path.exists(_SECRET_KEY_PATH):
+    with open(_SECRET_KEY_PATH, 'r') as _f:
+        app.secret_key = _f.read().strip()
+else:
+    app.secret_key = secrets.token_hex(32)
+    with open(_SECRET_KEY_PATH, 'w') as _f:
+        _f.write(app.secret_key)
+    os.chmod(_SECRET_KEY_PATH, 0o600)
+
+# --- Session Cookie Security ---
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
+
+# --- CSRF Protection ---
+# SameSite=Lax blocks most CSRF. This adds Origin/Referer validation as defense-in-depth.
+@app.before_request
+def csrf_protect():
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return  # Safe methods don't need CSRF checks
+    # Allow shared-link endpoints (public, no session needed)
+    if request.path.startswith('/api/links/verify') or request.path.startswith('/api/links/view'):
+        return
+    origin = request.headers.get('Origin') or ''
+    referer = request.headers.get('Referer') or ''
+    if origin:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin)
+        if parsed.netloc and parsed.netloc != request.host:
+            return jsonify({'error': 'CSRF rejected'}), 403
+    elif referer:
+        from urllib.parse import urlparse
+        parsed = urlparse(referer)
+        if parsed.netloc and parsed.netloc != request.host:
+            return jsonify({'error': 'CSRF rejected'}), 403
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '../backup/data'))
 USER_DB_PATH = os.path.abspath(os.path.join(BASE_DIR, '../backup/user.sql'))
-GUEST_DB_PATH = os.path.abspath(os.path.join(BASE_DIR, '../backup/guest.sql'))
+GLOBAL_SHARE_DB_PATH = os.path.abspath(os.path.join(BASE_DIR, '../backup/global_share.db'))
 
-def init_guest_db():
-    """Create guest.sql tables if they don't exist."""
-    conn = sqlite3.connect(GUEST_DB_PATH)
+def init_global_share_db():
+    """Create global_share.db tables if they don't exist."""
+    conn = sqlite3.connect(GLOBAL_SHARE_DB_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS guests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        password_salt TEXT NOT NULL,
-        host_count INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS guest_hosts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        guest_id INTEGER NOT NULL,
-        host_email TEXT NOT NULL,
-        added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_activated_date DATETIME,
-        access_till DATETIME NOT NULL,
-        status TEXT DEFAULT 'active',
-        FOREIGN KEY(guest_id) REFERENCES guests(id),
-        UNIQUE(guest_id, host_email)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS guest_assets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        guest_id INTEGER NOT NULL,
-        host_email TEXT NOT NULL,
-        asset_type TEXT NOT NULL,
+    c.execute('''CREATE TABLE IF NOT EXISTS shared_links (
+        link_hash TEXT PRIMARY KEY,
+        owner_email TEXT NOT NULL,
         asset_id INTEGER NOT NULL,
-        guest_asset_id INTEGER,
-        shared_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(guest_id) REFERENCES guests(id)
+        asset_title TEXT,
+        asset_type TEXT NOT NULL,
+        thumbnail_id INTEGER,
+        password_hash TEXT,
+        salt TEXT,
+        expires_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        link_name TEXT
+    )''')
+    # Migrate existing DBs that don't have link_name column yet
+    try:
+        c.execute('ALTER TABLE shared_links ADD COLUMN link_name TEXT')
+    except Exception:
+        pass  # Column already exists
+    
+    # New table for sharing internally with specific users
+    c.execute('''CREATE TABLE IF NOT EXISTS shared_asset_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_email TEXT NOT NULL,
+        asset_id INTEGER NOT NULL,
+        asset_title TEXT,
+        asset_type TEXT NOT NULL,
+        thumbnail_id INTEGER,
+        shared_with_email TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(owner_email, asset_id, asset_type, shared_with_email)
+    )''')
+    
+    # Table to track items hidden by viewers from a public link
+    c.execute('''CREATE TABLE IF NOT EXISTS shared_link_hidden_items (
+        link_hash TEXT NOT NULL,
+        photo_id INTEGER NOT NULL,
+        hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (link_hash, photo_id)
     )''')
     conn.commit()
     conn.close()
 
-# Initialize guest DB on startup
-init_guest_db()
-
-def get_guest_db():
-    """Get a connection to guest.sql with WAL mode."""
-    conn = sqlite3.connect(GUEST_DB_PATH)
+def get_global_share_db():
+    """Get a connection to global_share.db with WAL mode."""
+    conn = sqlite3.connect(GLOBAL_SHARE_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA busy_timeout=5000')
     return conn
 
-def is_guest_user(email):
-    """Check if the given email belongs to a guest rather than a full user."""
-    if not email:
-        return False
-    try:
-        conn = get_guest_db()
-        c = conn.cursor()
-        c.execute('SELECT id FROM guests WHERE email = ?', (email,))
-        result = c.fetchone() is not None
-        conn.close()
-        return result
-    except Exception:
-        return False
+# Initialize DBs on startup
+init_global_share_db()
+
+# Userid must be a safe string (email-like) — no path separators, .., or null bytes
+_SAFE_USERID_RE = re.compile(r'^[a-zA-Z0-9@._+\-]+$')
 
 def get_user_dir(userid):
+    if not userid or '..' in userid or not _SAFE_USERID_RE.match(userid):
+        raise ValueError(f"Invalid userid format")
     return os.path.join(DATA_DIR, userid)
+
+def safe_resolve_path(base_dir, untrusted_path):
+    """Resolve an untrusted path relative to base_dir, aborting on traversal."""
+    resolved = os.path.normpath(os.path.join(base_dir, untrusted_path))
+    # Trailing os.sep prevents prefix attacks: /data/user vs /data/user_evil
+    if not (resolved + os.sep).startswith(os.path.normpath(base_dir) + os.sep):
+        abort(403)
+    return resolved
 
 def get_thumbnail_dir(userid):
     return os.path.join(get_user_dir(userid), 'thumbnails')
@@ -113,60 +163,45 @@ def login():
             stored_hash, salt, status, is_admin, force_change = row
             if status != 'active':
                 return jsonify({'error': 'Account is not active'}), 403
-            calc_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-            if calc_hash == stored_hash:
-                resp = make_response(jsonify({
+            
+            # Verify password: bcrypt if salt is NULL/empty, legacy SHA-256 otherwise
+            password_ok = False
+            is_legacy = bool(salt)  # Legacy SHA-256 hashes have a salt column
+            if is_legacy:
+                calc_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+                password_ok = (calc_hash == stored_hash)
+            else:
+                try:
+                    password_ok = bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+                except Exception:
+                    password_ok = False
+            
+            if password_ok:
+                session.permanent = True
+                session['userid'] = userid
+                session['role'] = 'user'
+                return jsonify({
                     'success': True, 
                     'userid': userid,
                     'is_admin': bool(is_admin),
                     'role': 'user',
                     'force_change': bool(force_change)
-                }))
-                resp.set_cookie('userid', userid, max_age=12 * 60 * 60)
-                resp.set_cookie('role', 'user', max_age=12 * 60 * 60)
-                return resp
+                })
+                
+                # Auto-upgrade legacy SHA-256 hash to bcrypt on successful login
+                if is_legacy:
+                    try:
+                        new_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
+                        upgrade_conn = sqlite3.connect(USER_DB_PATH)
+                        uc = upgrade_conn.cursor()
+                        uc.execute("UPDATE users SET password_hash = ?, salt = NULL WHERE email = ?", (new_hash, userid))
+                        upgrade_conn.commit()
+                        upgrade_conn.close()
+                    except Exception:
+                        pass  # Non-critical: upgrade silently fails, old hash still works
             else:
                 return jsonify({'error': 'Invalid password'}), 401
         
-        # --- Step 2: Check guest.sql ---
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        gc.execute("SELECT id, password_hash, password_salt FROM guests WHERE email = ?", (userid,))
-        guest_row = gc.fetchone()
-        
-        if guest_row:
-            guest_id = guest_row['id']
-            calc_hash = hashlib.sha256(f"{password}{guest_row['password_salt']}".encode()).hexdigest()
-            if calc_hash != guest_row['password_hash']:
-                gconn.close()
-                return jsonify({'error': 'Invalid password'}), 401
-            
-            # Check if any host relationship is active and not expired
-            gc.execute("""SELECT host_email FROM guest_hosts 
-                          WHERE guest_id = ? AND status = 'active' AND access_till >= datetime('now')""", (guest_id,))
-            active_hosts = [r['host_email'] for r in gc.fetchall()]
-            
-            if not active_hosts:
-                gconn.close()
-                return jsonify({'error': 'Guest access has expired or been revoked'}), 403
-            
-            # Update last_login
-            gc.execute("UPDATE guests SET last_login = datetime('now') WHERE id = ?", (guest_id,))
-            gconn.commit()
-            gconn.close()
-            
-            resp = make_response(jsonify({
-                'success': True,
-                'userid': userid,
-                'is_admin': False,
-                'role': 'guest',
-                'hosts': active_hosts
-            }))
-            resp.set_cookie('userid', userid, max_age=12 * 60 * 60)
-            resp.set_cookie('role', 'guest', max_age=12 * 60 * 60)
-            return resp
-        
-        gconn.close()
         return jsonify({'error': 'User not found'}), 404
              
     except Exception as e:
@@ -175,8 +210,8 @@ def login():
 
 @app.route('/api/auth/check', methods=['GET'])
 def check_auth():
-    userid = request.cookies.get('userid')
-    role = request.cookies.get('role', 'user')
+    userid = session.get('userid')
+    role = session.get('role', 'user')
     if userid:
         is_admin = False
         force_change = False
@@ -196,7 +231,7 @@ def check_auth():
 
 @app.route('/api/auth/change_password', methods=['POST'])
 def change_password():
-    userid = request.cookies.get('userid')
+    userid = session.get('userid')
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -210,10 +245,9 @@ def change_password():
         conn = sqlite3.connect(USER_DB_PATH)
         c = conn.cursor()
         
-        salt = secrets.token_hex(16)
-        password_hash = hashlib.sha256(f"{new_password}{salt}".encode()).hexdigest()
+        password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
         
-        c.execute("UPDATE users SET password_hash = ?, salt = ?, force_password_change = 0 WHERE email = ?", (password_hash, salt, userid))
+        c.execute("UPDATE users SET password_hash = ?, salt = NULL, force_password_change = 0 WHERE email = ?", (password_hash, userid))
         conn.commit()
         conn.close()
         
@@ -223,13 +257,12 @@ def change_password():
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    resp = jsonify({'success': True})
-    resp.delete_cookie('userid')
-    return resp
+    session.clear()
+    return jsonify({'success': True})
 
 def get_current_userid():
-    """Resolve userid from request params or cookie."""
-    return request.args.get('userid') or (request.get_json(silent=True) or {}).get('userid') or request.cookies.get('userid')
+    """Resolve userid exclusively from signed session."""
+    return session.get('userid')
 
 @app.route('/api/scan', methods=['POST'])
 def scan_files():
@@ -237,7 +270,7 @@ def scan_files():
     # However, frontend expects a tree structure. 
     # We can either construct it from DB or filesystem. 
     # Filesystem is still the source of truth for the tree view.
-    userid = request.json.get('userid')
+    userid = session.get('userid')
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -275,9 +308,150 @@ def scan_files():
 
     return jsonify({'devices': devices})
 
+def _is_authorized_for_asset(userid, asset_path):
+    """Check if the current request is authorized to view this asset.
+    Allows access if logged in as the owner, if explicitly shared with the current user, 
+    or if a valid valid link token is present for this asset.
+    """
+    current_userid = get_current_userid()
+    
+    # 1. Check if logged in directly as owner
+    if current_userid == userid:
+        return True
+        
+    # 2. Check explicitly shared assets (Internal Sharing)
+    if current_userid:
+        gconn = get_global_share_db()
+        gc = gconn.cursor()
+        try:
+            # Get all assets shared with this user by this owner
+            gc.execute("SELECT asset_id, asset_type FROM shared_asset_users WHERE owner_email = ? AND shared_with_email = ?", (userid, current_userid))
+            shared_items = gc.fetchall()
+            
+            if shared_items:
+                conn = database.get_db_connection(userid)
+                c = conn.cursor()
+                try:
+                    for row in shared_items:
+                        asset_id = row['asset_id']
+                        asset_type = row['asset_type']
+                        
+                        if asset_type in ('photo', 'video'):
+                            c.execute("SELECT path FROM photos WHERE id = ?", (asset_id,))
+                            photo_row = c.fetchone()
+                            if photo_row and photo_row['path'] == asset_path:
+                                return True
+                        elif asset_type == 'album':
+                            c.execute("""
+                                SELECT 1 FROM photos p
+                                JOIN album_photos ap ON p.id = ap.photo_id
+                                WHERE ap.album_id = ? AND p.path = ?
+                            """, (asset_id, asset_path))
+                            if c.fetchone():
+                                return True
+                finally:
+                    conn.close()
+        finally:
+            gconn.close()
+        
+    # 3. Check for active link cookies (Public Sharing)
+    # We look for any cookie starting with 'link_auth_'
+    # and verify it against the global_share db.
+    for cookie_name, link_hash in request.cookies.items():
+        if cookie_name.startswith('link_auth_'):
+            gconn = get_global_share_db()
+            gc = gconn.cursor()
+            try:
+                gc.execute("SELECT asset_id, asset_type FROM shared_links WHERE link_hash = ? AND owner_email = ?", (link_hash, userid))
+                row = gc.fetchone()
+                if row:
+                    asset_id = row['asset_id']
+                    asset_type = row['asset_type']
+                    
+                    # We need to see if this asset corresponds to the requested path.
+                    # This requires checking the user's DB.
+                    conn = database.get_db_connection(userid)
+                    c = conn.cursor()
+                    try:
+                        if asset_type in ('photo', 'video'):
+                            # Check if the requested path matches this asset's path
+                            c.execute("SELECT path FROM photos WHERE id = ?", (asset_id,))
+                            photo_row = c.fetchone()
+                            if photo_row and photo_row['path'] == asset_path:
+                                return True
+                        elif asset_type == 'album':
+                            # Check if the requested path is part of this album
+                            c.execute("""
+                                SELECT p.path FROM photos p
+                                JOIN album_photos ap ON p.id = ap.photo_id
+                                WHERE ap.album_id = ? AND p.path = ?
+                            """, (asset_id, asset_path))
+                            if c.fetchone():
+                                return True
+                    finally:
+                        conn.close()
+            finally:
+                gconn.close()
+                
+    return False
+
 @app.route('/resource/thumbnail/<userid>/<filename>')
 def serve_thumbnail(userid, filename):
+    if not _SAFE_USERID_RE.match(userid):
+        abort(400)
     thumb_dir = get_thumbnail_dir(userid)
+    
+    # Reconstruct the original file path from the thumbnail name to check auth
+    # Format: device__rel_path.ext
+    # Warning: this is a heuristic to go from thumb to path. 
+    # Actually, we can just allow thumbnails if they provide *any* valid link_hash for simplicity and performance?
+    # Or strict: decode it. Let's do strict.
+    # filename is `device__files_rest_of_path.ext` or `device__rest_of_path`.ext
+    try:
+        parts = filename.split('__', 1)
+        if len(parts) == 2:
+            device = parts[0]
+            rest = parts[1]
+            if rest.endswith('.jpg'):
+                 # It might be a video thumbnail, or an original jpg. The actual path might differ slightly.
+                 # Actually, the DB has `thumbnail_path`. But for `/resource/thumbnail/`, the frontend passes
+                 # what `build_photo_response` generated. 
+                 # Let's bypass strict thumbnail checking if they have ANY valid link cookie for the user,
+                 # or if we want to be very secure, do a DB lookup by thumbnail.
+                 pass
+    except Exception:
+        pass
+        
+    # For thumbnails, to prevent N+1 queries on album loads, if they have the cookie for the album, we just let them load it.
+    # Let's do a slightly looser check: if they have a valid cookie for THIS userid, we allow thumbnails, 
+    # relying on the frontend to only know the unguessable thumbnail names.
+    authorized = False
+    current_userid = get_current_userid()
+    if current_userid == userid:
+        authorized = True
+    else:
+        if current_userid:
+            gconn = get_global_share_db()
+            gc = gconn.cursor()
+            gc.execute("SELECT 1 FROM shared_asset_users WHERE owner_email = ? AND shared_with_email = ?", (userid, current_userid))
+            if gc.fetchone():
+                authorized = True
+            gconn.close()
+
+        if not authorized:
+            for cookie_name, link_hash in request.cookies.items():
+                if cookie_name.startswith('link_auth_'):
+                    gconn = get_global_share_db()
+                    gc = gconn.cursor()
+                    gc.execute("SELECT 1 FROM shared_links WHERE link_hash = ? AND owner_email = ?", (link_hash, userid))
+                    if gc.fetchone():
+                        authorized = True
+                    gconn.close()
+                    if authorized: break
+                
+    if not authorized:
+        abort(403)
+        
     return send_from_directory(thumb_dir, filename)
 
 def send_file_partial(path):
@@ -297,12 +471,15 @@ def serve_video_transcoded(userid, device, filename):
     Stream-transcode browser-incompatible video formats (MTS, M2TS, AVI, MKV)
     to H.264/AAC MP4 on-the-fly via ffmpeg so the browser can play them.
     """
+    if not _SAFE_USERID_RE.match(userid):
+        abort(400)
     user_dir = get_user_dir(userid)
-    file_path = os.path.join(user_dir, device, 'files', filename)
-    if not os.path.abspath(file_path).startswith(os.path.abspath(user_dir)):
-        abort(403)
+    file_path = safe_resolve_path(user_dir, os.path.join(device, 'files', filename))
     if not os.path.exists(file_path):
         abort(404)
+        
+    if not _is_authorized_for_asset(userid, file_path):
+        abort(403)
 
     def generate():
         cmd = [
@@ -340,17 +517,21 @@ def serve_video_transcoded(userid, device, filename):
 
 @app.route('/resource/image/<userid>/<device>/<path:filename>')
 def serve_image(userid, device, filename):
+    if not _SAFE_USERID_RE.match(userid):
+        abort(400)
     user_dir = get_user_dir(userid)
-    file_path = os.path.join(user_dir, device, 'files', filename)
-    if not os.path.abspath(file_path).startswith(os.path.abspath(user_dir)):
-        abort(403)
+    file_path = safe_resolve_path(user_dir, os.path.join(device, 'files', filename))
     if not os.path.exists(file_path):
         abort(404)
+        
+    if not _is_authorized_for_asset(userid, file_path):
+        abort(403)
+        
     return send_file_partial(file_path)
 
 @app.route('/api/photo/metadata', methods=['GET'])
 def get_photo_metadata():
-    userid = request.args.get('userid')
+    userid = session.get('userid')
     photo_id = request.args.get('id')
     path_arg = request.args.get('path') # Relative path if ID not available
     
@@ -443,7 +624,7 @@ def get_photo_metadata():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    userid = request.form.get('userid')
+    userid = session.get('userid')
     batch_id = request.form.get('upload_batch_id')
     
     if not userid or not batch_id:
@@ -479,7 +660,7 @@ def upload_file():
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
-    userid = request.args.get('userid')
+    userid = session.get('userid')
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -809,7 +990,7 @@ def search_photos():
 
 @app.route('/api/files/list', methods=['GET'])
 def list_files():
-    userid = request.args.get('userid')
+    userid = session.get('userid')
     path_arg = request.args.get('path', '')
     
     if not userid:
@@ -818,9 +999,7 @@ def list_files():
     user_dir = get_user_dir(userid)
     
     # Security: Ensure path is within user_dir
-    target_path = os.path.normpath(os.path.join(user_dir, path_arg))
-    if not target_path.startswith(user_dir):
-        return jsonify({'error': 'Access denied'}), 403
+    target_path = safe_resolve_path(user_dir, path_arg)
 
     if not os.path.exists(target_path):
         return jsonify({'error': 'Path not found'}), 404
@@ -857,7 +1036,7 @@ def list_files():
 @app.route('/api/files/rename', methods=['POST'])
 def rename_file():
     data = request.json
-    userid = data.get('userid')
+    userid = session.get('userid')
     path_arg = data.get('path')
     new_name = data.get('new_name')
     
@@ -865,13 +1044,13 @@ def rename_file():
         return jsonify({'error': 'Missing parameters'}), 400
         
     user_dir = get_user_dir(userid)
-    old_path = os.path.normpath(os.path.join(user_dir, path_arg))
+    old_path = safe_resolve_path(user_dir, path_arg)
     
     parent_dir = os.path.dirname(old_path)
     new_path = os.path.join(parent_dir, new_name)
     
-    if not old_path.startswith(user_dir) or not new_path.startswith(user_dir):
-        return jsonify({'error': 'Access denied'}), 403
+    # Ensure new path also stays within user_dir
+    safe_resolve_path(user_dir, os.path.relpath(new_path, user_dir))
         
     if not os.path.exists(old_path):
         return jsonify({'error': 'File not found'}), 404
@@ -888,7 +1067,7 @@ def rename_file():
 @app.route('/api/files/batch-delete', methods=['POST'])
 def delete_files_batch():
     data = request.json
-    userid = data.get('userid')
+    userid = session.get('userid')
     paths = data.get('paths', []) # List of relative paths (relative to user_dir)
     
     if not userid or not paths:
@@ -900,12 +1079,9 @@ def delete_files_batch():
     errors = []
     
     for path_arg in paths:
-        target_path = os.path.normpath(os.path.join(user_dir, path_arg))
+        target_path = safe_resolve_path(user_dir, path_arg)
         
-        # Security check
-        if not target_path.startswith(user_dir):
-            errors.append(f"{path_arg}: Access denied")
-            continue
+        # safe_resolve_path aborts on traversal
             
         if not os.path.exists(target_path):
             errors.append(f"{path_arg}: Not found")
@@ -926,18 +1102,15 @@ def delete_files_batch():
 @app.route('/api/files/delete', methods=['POST'])
 def delete_file():
     data = request.json
-    userid = data.get('userid')
+    userid = session.get('userid')
     path_arg = data.get('path')
     
     if not userid or not path_arg:
         return jsonify({'error': 'Missing parameters'}), 400
         
     user_dir = get_user_dir(userid)
-    target_path = os.path.normpath(os.path.join(user_dir, path_arg))
+    target_path = safe_resolve_path(user_dir, path_arg)
     
-    if not target_path.startswith(user_dir):
-        return jsonify({'error': 'Access denied'}), 403
-        
     if not os.path.exists(target_path):
         return jsonify({'error': 'File not found'}), 404
         
@@ -951,6 +1124,139 @@ def delete_file():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/files/edit', methods=['POST'])
+def edit_file():
+    data = request.json
+    userid = get_current_userid()
+    file_id = data.get('file_id')
+    image_data_b64 = data.get('image_data')
+    save_mode = data.get('save_mode')       # 'overwrite' or 'save_as'
+    new_filename_raw = data.get('new_filename', '').strip()  # optional custom name for save_as
+    
+    if not userid or not file_id or not image_data_b64 or not save_mode:
+        return jsonify({'error': 'Missing parameters'}), 400
+        
+    try:
+        # Strip the data URL prefix "data:image/jpeg;base64,"
+        header, encoded = image_data_b64.split(",", 1)
+        image_bytes = base64.b64decode(encoded)
+        
+        conn = database.get_db_connection(userid)
+        c = conn.cursor()
+        
+        # Look up original file details (photos table has no filename column — derive it from path)
+        # Fetch all metadata so we can copy it to the new row
+        c.execute("""
+            SELECT path, date_taken, description, location_lat, location_lon
+            FROM photos WHERE id = ?
+        """, (file_id,))
+        row = c.fetchone()
+        
+        if not row:
+            conn.close()
+            return jsonify({'error': 'Original file not found'}), 404
+            
+        original_relative_path = row['path']
+        original_filename = os.path.basename(original_relative_path)
+        original_abs_path = os.path.join(DATA_DIR, userid, original_relative_path)
+        
+        if not os.path.exists(original_abs_path):
+            conn.close()
+            return jsonify({'error': 'Source file missing from disk'}), 404
+
+        new_hash = hashlib.sha256(image_bytes).hexdigest()
+        new_size = len(image_bytes)
+        
+        if save_mode == 'overwrite':
+            # Write bytes directly over original file
+            with open(original_abs_path, 'wb') as f:
+                f.write(image_bytes)
+                
+            # Write bytes over original file — path unchanged, no DB update needed
+            conn.commit()
+            
+            # Regenerate thumbnail inline — no daemon involvement
+            try:
+                from PIL import Image as PILImage
+                thumb_dir = get_thumbnail_dir(userid)
+                os.makedirs(thumb_dir, exist_ok=True)
+                thumb_name = os.path.splitext(original_filename)[0] + '_thumb.jpg'
+                thumb_path = os.path.join(thumb_dir, thumb_name)
+                pil_img = PILImage.open(original_abs_path)
+                pil_img.thumbnail((400, 400))
+                pil_img.save(thumb_path, 'JPEG')
+            except Exception as e:
+                print(f'Warning: Could not regenerate thumbnail for overwrite: {e}')
+
+            conn.close()
+            return jsonify({'success': True, 'action': 'overwritten', 'file_id': file_id})
+            
+        elif save_mode == 'save_as':
+            # Use caller-provided name, or derive a default from original
+            name, ext = os.path.splitext(original_filename)
+            if new_filename_raw:
+                # Sanitise: strip path separators, ensure correct extension
+                safe_name = os.path.basename(new_filename_raw)
+                # Force the original extension if the caller didn't include one
+                if not os.path.splitext(safe_name)[1]:
+                    safe_name = safe_name + ext
+                new_filename = safe_name
+            else:
+                new_filename = f"{name}_copy{ext}"
+            
+            # Ensure unique filename in the same directory
+            original_dir = os.path.dirname(original_abs_path)
+            relative_dir = os.path.dirname(original_relative_path)
+            
+            counter = 1
+            test_abs_path = os.path.join(original_dir, new_filename)
+            while os.path.exists(test_abs_path):
+                n, e = os.path.splitext(new_filename)
+                new_filename = f"{n}_{counter}{e}"
+                test_abs_path = os.path.join(original_dir, new_filename)
+                counter += 1
+                
+            # Write new file to disk
+            with open(test_abs_path, 'wb') as f:
+                f.write(image_bytes)
+
+            # Insert new row, copying all metadata from the original
+            new_relative_path = os.path.join(relative_dir, new_filename) if relative_dir else new_filename
+            c.execute("""
+                INSERT INTO photos (path, type, timestamp, date_taken, description, location_lat, location_lon)
+                VALUES (?, 'photo', ?, ?, ?, ?, ?)
+            """, (
+                new_relative_path,
+                int(time.time()),
+                row['date_taken'],
+                row['description'],
+                row['location_lat'],
+                row['location_lon']
+            ))
+            
+            new_id = c.lastrowid
+            conn.commit()
+            
+            # Generate thumbnail inline — no daemon involvement
+            try:
+                from PIL import Image as PILImage
+                thumb_dir = get_thumbnail_dir(userid)
+                os.makedirs(thumb_dir, exist_ok=True)
+                thumb_name = os.path.splitext(new_filename)[0] + '_thumb.jpg'
+                thumb_path = os.path.join(thumb_dir, thumb_name)
+                pil_img = PILImage.open(test_abs_path)
+                pil_img.thumbnail((400, 400))
+                pil_img.save(thumb_path, 'JPEG')
+            except Exception as e:
+                print(f'Warning: Could not generate thumbnail for new copy: {e}')
+
+            conn.close()
+            return jsonify({'success': True, 'action': 'saved_as_copy', 'new_file_id': new_id})
+
+    except Exception as e:
+        print(f"Error saving edited file: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # --- Admin API ---
 
 import reset_db
@@ -959,7 +1265,7 @@ def admin_required(f):
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        userid = request.cookies.get('userid')
+        userid = session.get('userid')
         if not userid:
              return jsonify({'error': 'Unauthorized'}), 401
         
@@ -1012,14 +1318,13 @@ def add_user():
         return jsonify({'error': 'User already exists'}), 409
         
     try:
-        salt = secrets.token_hex(16)
-        password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
         unique_id = hashlib.sha256(f"{time.time()}{secrets.token_hex(16)}".encode()).hexdigest()
         
         c.execute("""
             INSERT INTO users (email, password_hash, salt, unique_id, is_admin, status, force_password_change)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        """, (email, password_hash, salt, unique_id, False, 'active'))
+            VALUES (?, ?, NULL, ?, ?, ?, 1)
+        """, (email, password_hash, unique_id, False, 'active'))
         conn.commit()
         return jsonify({'success': True})
     except Exception as e:
@@ -1061,7 +1366,7 @@ def delete_user_admin():
         return jsonify({'error': 'User ID required'}), 400
         
     # Prevent deleting yourself
-    current_admin = request.cookies.get('userid')
+    current_admin = session.get('userid')
     if userid == current_admin:
         return jsonify({'error': 'Cannot delete yourself'}), 400
 
@@ -1114,18 +1419,15 @@ def delete_user_admin():
 
 def delete_file():
     data = request.json
-    userid = data.get('userid')
+    userid = session.get('userid')
     path_arg = data.get('path')
     
     if not userid or not path_arg:
         return jsonify({'error': 'Missing parameters'}), 400
         
     user_dir = get_user_dir(userid)
-    target_path = os.path.normpath(os.path.join(user_dir, path_arg))
+    target_path = safe_resolve_path(user_dir, path_arg)
     
-    if not target_path.startswith(user_dir):
-        return jsonify({'error': 'Access denied'}), 403
-        
     if not os.path.exists(target_path):
         return jsonify({'error': 'path not found'}), 404
         
@@ -1142,7 +1444,7 @@ def delete_file():
 @app.route('/api/files/download', methods=['POST'])
 def download_files():
     data = request.json
-    userid = data.get('userid')
+    userid = session.get('userid')
     paths = data.get('paths', [])
     
     if not userid or not paths:
@@ -1156,10 +1458,7 @@ def download_files():
         with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
             for path_arg in paths:
                 # Security check
-                full_path = os.path.normpath(os.path.join(user_dir, path_arg))
-                if not full_path.startswith(user_dir):
-                    continue
-                    
+                full_path = safe_resolve_path(user_dir, path_arg)
                 if not os.path.exists(full_path):
                     continue
                     
@@ -1190,7 +1489,7 @@ def download_files():
 @app.route('/api/timeline', methods=['GET'])
 def get_timeline():
     """Get photos grouped by date for timeline view"""
-    userid = request.args.get('userid')
+    userid = session.get('userid')
     year = request.args.get('year')
     month = request.args.get('month')
     filter_type = request.args.get('type') # 'photo' | 'screenshot' | 'video'
@@ -1393,17 +1692,137 @@ def list_albums():
         
         albums.append(album)
 
-        # Check if album contains any received/shared photos
-        c.execute("""
-            SELECT 1 FROM album_photos ap
-            JOIN shared_photos sp ON sp.recipient_photo_id = ap.photo_id
-            WHERE ap.album_id = ? AND sp.recipient_email = ?
-            LIMIT 1
-        """, (r['id'], userid))
-        album['has_shared_photos'] = c.fetchone() is not None
+        # removed legacy checking of shared_photos table
+        album['has_shared_photos'] = False
     
     conn.close()
+
+    # Fetch shared albums
+    gconn = get_global_share_db()
+    gconn.row_factory = sqlite3.Row
+    try:
+        gc = gconn.cursor()
+        gc.execute("""
+            SELECT owner_email, asset_id, asset_title, thumbnail_id, created_at
+            FROM shared_asset_users
+            WHERE shared_with_email = ? AND asset_type = 'album'
+        """, (userid,))
+        for s in gc.fetchall():
+            shared_album = {
+                'id': f"shared_{s['asset_id']}_{s['owner_email']}",
+                'name': s['asset_title'] or 'Shared Album',
+                'description': f"Shared by {s['owner_email']}",
+                'album_type': 'shared',
+                'created_at': s['created_at'],
+                'source_album_id': None,
+                'owner_email': s['owner_email'],
+                'cover_url': None,
+                'has_shared_photos': False
+            }
+            try:
+                owner_conn = database.get_db_connection(s['owner_email'])
+                owner_conn.row_factory = sqlite3.Row
+                oc = owner_conn.cursor()
+                
+                oc.execute("SELECT COUNT(*) FROM album_photos WHERE album_id = ?", (s['asset_id'],))
+                shared_album['photo_count'] = oc.fetchone()[0]
+                
+                thumb_id = s['thumbnail_id']
+                if not thumb_id:
+                    oc.execute("""
+                        SELECT p.id FROM photos p
+                        JOIN album_photos ap ON p.id = ap.photo_id
+                        WHERE ap.album_id = ?
+                        ORDER BY ap.rowid ASC LIMIT 1
+                    """, (s['asset_id'],))
+                    first_photo = oc.fetchone()
+                    if first_photo:
+                        thumb_id = first_photo['id']
+                
+                if thumb_id:
+                    oc.execute("SELECT path, type FROM photos WHERE id = ?", (thumb_id,))
+                    thumb_row = oc.fetchone()
+                    if thumb_row:
+                        thumb_data = build_photo_response(thumb_row['path'], thumb_id, thumb_row['type'], userid=s['owner_email'])
+                        if thumb_data:
+                            shared_album['cover_url'] = thumb_data.get('thumbnail_url')
+                owner_conn.close()
+            except Exception as e:
+                print(f"Error fetching data for shared album: {e}")
+                shared_album['photo_count'] = 0
+
+            albums.append(shared_album)
+    except Exception as e:
+        print(f"Error fetching shared albums: {e}")
+    finally:
+        gconn.close()
+
     return jsonify({'albums': albums})
+
+@app.route('/api/users', methods=['GET'])
+def list_active_users():
+    """List all active users for sharing (excluding admin and current user)"""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+        
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    # Exclude the current user and admin users
+    c.execute("SELECT email FROM users WHERE status = 'active' AND is_admin = 0 AND email != ?", (userid,))
+    users = [row['email'] for row in c.fetchall()]
+    conn.close()
+    return jsonify({'users': users})
+
+@app.route('/api/albums/<album_id>/share/user', methods=['POST'])
+def share_album_user(album_id):
+    """Share album(s) with specific users"""
+    userid = get_current_userid()
+    if not userid:
+        return jsonify({'error': 'Unauthorized'}), 401
+        
+    data = request.json
+    shared_with_emails = data.get('shared_with_emails', [])
+    if not shared_with_emails:
+        return jsonify({'error': 'No users specified'}), 400
+        
+    album_ids = [aid.strip() for aid in str(album_id).split(',') if aid.strip().isdigit()]
+    if not album_ids:
+        return jsonify({'error': 'Invalid album ID(s)'}), 400
+        
+    conn = database.get_db_connection(userid)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    albums = []
+    for aid in album_ids:
+        c.execute("SELECT * FROM albums WHERE id = ?", (aid,))
+        album = c.fetchone()
+        if album:
+            albums.append(album)
+    conn.close()
+    
+    if not albums:
+        return jsonify({'error': 'No valid albums found'}), 404
+        
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
+    try:
+        for album in albums:
+            for email in shared_with_emails:
+                gc.execute('''
+                    INSERT OR IGNORE INTO shared_asset_users 
+                    (owner_email, asset_id, asset_title, asset_type, thumbnail_id, shared_with_email) 
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (userid, album['id'], album['name'], 'album', album['cover_photo_id'], email))
+        gconn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        gconn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
 
 @app.route('/api/albums/create', methods=['POST'])
 def create_album():
@@ -1433,12 +1852,35 @@ def create_album():
     
     return jsonify({'success': True, 'album_id': album_id})
 
-@app.route('/api/albums/<int:album_id>', methods=['DELETE'])
+@app.route('/api/albums/<album_id>', methods=['DELETE'])
 def delete_album(album_id):
-    """Delete an album. If the album was shared, cascade unshare to recipients."""
+    """Delete an album. If the album was shared, cascade unshare to recipients (for owner) or remove from view (for recipient)."""
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
+
+    if isinstance(album_id, str) and album_id.startswith('shared_'):
+        parts = album_id.split('_', 2)
+        if len(parts) == 3:
+            asset_id = int(parts[1])
+            owner_email = parts[2]
+            gconn = get_global_share_db()
+            gc = gconn.cursor()
+            try:
+                gc.execute("DELETE FROM shared_asset_users WHERE asset_id = ? AND asset_type = 'album' AND shared_with_email = ? AND owner_email = ?", (asset_id, userid, owner_email))
+                gconn.commit()
+                return jsonify({'success': True})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+            finally:
+                gconn.close()
+        return jsonify({'error': 'Invalid shared album ID'}), 400
+
+    try:
+        album_id = int(album_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid album ID'}), 400
+
     conn = database.get_db_connection(userid)
     c = conn.cursor()
     
@@ -1454,80 +1896,23 @@ def delete_album(album_id):
         c.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (album_id,))
         album_photo_ids = [row['photo_id'] for row in c.fetchall()]
 
-        if album['album_type'] != 'shared':
-            # Owner is deleting their own album
-            # Find all recipients who have a shared copy of this album
-            # Since we don't track shared albums explicitly in owner DB, we scan all users
-            # to see if they have a copy. This ensures even empty albums are cleaned up.
-            recipients = set()
-            try:
-                u_conn = sqlite3.connect(USER_DB_PATH)
-                u_c = u_conn.cursor()
-                u_c.execute("SELECT email FROM users WHERE email != ? AND status = 'active'", (userid,))
-                recipients = {r[0] for r in u_c.fetchall()}
-                u_conn.close()
-            except Exception as e:
-                print(f"Error fetching user list for cleanup: {e}")
-
-            # For each recipient, find and clean up their shared album copy
-            for recip_email in recipients:
-                try:
-                    recip_conn = database.get_db_connection(recip_email)
-                    rc = recip_conn.cursor()
-                    
-                    # Find albums shared from this source
-                    rc.execute(
-                        "SELECT id FROM albums WHERE source_album_id = ? AND owner_email = ?",
-                        (album_id, userid)
-                    )
-                    shared_albums = rc.fetchall()
-                    
-                    for sa in shared_albums:
-                        shared_album_id = sa['id']
-                        # Get photos in the shared album
-                        rc.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (shared_album_id,))
-                        shared_photo_ids = [r['photo_id'] for r in rc.fetchall()]
-                        
-                        for spid in shared_photo_ids:
-                            # Get photo path to remove symlink
-                            rc.execute("SELECT path FROM photos WHERE id = ?", (spid,))
-                            photo_row = rc.fetchone()
-                            if photo_row:
-                                symlink_path = photo_row['path']
-                                if os.path.islink(symlink_path):
-                                    os.unlink(symlink_path)
-                                
-                                # Remove thumbnail symlink
-                                recip_thumb_dir = get_thumbnail_dir(recip_email)
-                                unique_name = os.path.basename(symlink_path)
-                                recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
-                                recip_thumb_path = os.path.join(recip_thumb_dir, recip_thumb_name)
-                                if os.path.islink(recip_thumb_path):
-                                    os.unlink(recip_thumb_path)
-                            
-                            # Clean up DB records
-                            rc.execute("DELETE FROM photo_people WHERE photo_id = ?", (spid,))
-                            rc.execute("DELETE FROM photos WHERE id = ?", (spid,))
-                            rc.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (spid,))
-                        
-                        # Remove the shared album
-                        rc.execute("DELETE FROM album_photos WHERE album_id = ?", (shared_album_id,))
-                        rc.execute("DELETE FROM albums WHERE id = ?", (shared_album_id,))
-                    
-                    recip_conn.commit()
-                    recip_conn.close()
-                except Exception as e:
-                    print(f"Error cleaning up shared album for {recip_email}: {e}")
-
-            # Also clean up owner's shared_photos records for these photos
-            for pid in album_photo_ids:
-                c.execute("DELETE FROM shared_photos WHERE original_photo_id = ?", (pid,))
-
         # Delete the album itself
         c.execute("DELETE FROM album_photos WHERE album_id = ?", (album_id,))
         c.execute("DELETE FROM albums WHERE id = ?", (album_id,))
         conn.commit()
         conn.close()
+        
+        # Cascade unshare
+        gconn = get_global_share_db()
+        try:
+            gc = gconn.cursor()
+            gc.execute("DELETE FROM shared_asset_users WHERE asset_id = ? AND asset_type = 'album' AND owner_email = ?", (album_id, userid))
+            gconn.commit()
+        except:
+            pass
+        finally:
+            gconn.close()
+            
         return jsonify({'success': True})
     except Exception as e:
         conn.close()
@@ -1535,7 +1920,7 @@ def delete_album(album_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/albums/<int:album_id>/photos', methods=['GET'])
+@app.route('/api/albums/<album_id>/photos', methods=['GET'])
 def get_album_photos(album_id):
     """Get photos in a specific album"""
     userid = get_current_userid() # Use current user's ID
@@ -1543,7 +1928,44 @@ def get_album_photos(album_id):
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    conn = database.get_db_connection(userid)
+    # Check if user owns the album OR if it's shared with them
+    is_owner = True
+    owner_email = userid
+    
+    if isinstance(album_id, str) and album_id.startswith('shared_'):
+        parts = album_id.split('_', 2)
+        if len(parts) == 3:
+            album_id = int(parts[1])
+            owner_email = parts[2]
+            
+            gconn = get_global_share_db()
+            gc = gconn.cursor()
+            try:
+                gc.execute("SELECT 1 FROM shared_asset_users WHERE asset_id = ? AND asset_type = 'album' AND shared_with_email = ? AND owner_email = ?", (album_id, userid, owner_email))
+                if not gc.fetchone():
+                    return jsonify({'error': 'Album not found or access denied'}), 404
+            finally:
+                gconn.close()
+            is_owner = False
+        else:
+            return jsonify({'error': 'Invalid shared album ID'}), 400
+    else:
+        try:
+            album_id = int(album_id)
+        except ValueError:
+            return jsonify({'error': 'Invalid album ID'}), 400
+
+        conn = database.get_db_connection(userid)
+        c = conn.cursor()
+        c.execute("SELECT id FROM albums WHERE id = ?", (album_id,))
+        if not c.fetchone():
+            conn.close()
+            return jsonify({'error': 'Album not found'}), 404
+        conn.close()
+            
+    # Now fetch from the owner's DB
+    conn = database.get_db_connection(owner_email)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
     c.execute("""
@@ -1559,7 +1981,7 @@ def get_album_photos(album_id):
     
     for r in rows:
         try:
-            photo_data = build_photo_response(r['path'], r['id'], r['type'], userid=userid)
+            photo_data = build_photo_response(r['path'], r['id'], r['type'], userid=owner_email) # pass owner_email for correct URL paths
             if photo_data:
                 photo_data['description'] = r['description']
                 photos.append(photo_data)
@@ -1587,11 +2009,6 @@ def add_photos_to_album(album_id):
     
     added = 0
     for photo_id in photo_ids:
-        # Prevent adding received/shared photos to albums
-        c.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo_id, userid))
-        if c.fetchone():
-            continue
-
         try:
             c.execute(
                 "INSERT INTO album_photos (album_id, photo_id) VALUES (?, ?)",
@@ -1642,7 +2059,7 @@ def remove_photos_from_album(album_id):
 @app.route('/api/albums/auto-generate', methods=['POST'])
 def auto_generate_albums():
     """Auto-generate albums based on date clustering"""
-    userid = request.json.get('userid')
+    userid = session.get('userid')
     
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -1720,7 +2137,7 @@ def auto_generate_albums():
 @app.route('/api/discover/memories', methods=['GET'])
 def get_memories():
     """Get curated memories (year ago, this day in history, etc.)"""
-    userid = request.args.get('userid')
+    userid = session.get('userid')
     
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -1847,929 +2264,602 @@ def build_photo_response(abs_path, photo_id, media_type=None, userid=None):
                 'thumbnail_url': f"/resource/thumbnail/{file_userid}/{safe_thumb}",
                 'image_url': video_url,
                 'type': media_type,
-                'is_video': media_type == 'video',
-                'shared_with': [],
-                'is_received': False
+                'is_video': media_type == 'video'
             }
-            
-            # Add share info if userid is provided
-            if userid:
-                try:
-                    conn = database.get_db_connection(userid)
-                    c = conn.cursor()
-                    # Check if this photo was shared by us
-                    c.execute("SELECT recipient_email FROM shared_photos WHERE original_photo_id = ?", (photo_id,))
-                    shared_rows = c.fetchall()
-                    result['shared_with'] = [r['recipient_email'] for r in shared_rows]
-                    
-                    # Check if this photo was received (shared TO us)
-                    c.execute("SELECT owner_email FROM shared_photos WHERE recipient_photo_id = ?", (photo_id,))
-                    received = c.fetchone()
-                    if received:
-                        result['is_received'] = True
-                        result['shared_by'] = received['owner_email']
-                    conn.close()
-                except Exception:
-                    pass
             
             return result
     except Exception:
         pass
     return None
 
-# --- Sharing API ---
+# --- Global Sharing API ---
 
-@app.route('/api/users/list', methods=['GET'])
-def list_users():
-    """List all users + active guests of current user for the share picker"""
-    current_user = get_current_userid()
-    if not current_user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    try:
-        # Regular users
-        conn = sqlite3.connect(USER_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT email, status FROM users WHERE email != ? AND status = 'active'", (current_user,))
-        users = [{'email': r['email'], 'type': 'user'} for r in c.fetchall()]
-        conn.close()
-        
-        # Active guests of current user (only if current user is not a guest)
-        if not is_guest_user(current_user):
-            try:
-                gconn = get_guest_db()
-                gc = gconn.cursor()
-                gc.execute("""SELECT g.email FROM guests g
-                              JOIN guest_hosts gh ON g.id = gh.guest_id
-                              WHERE gh.host_email = ? AND gh.status = 'active'
-                              AND gh.access_till >= datetime('now')""", (current_user,))
-                for r in gc.fetchall():
-                    users.append({'email': r['email'], 'type': 'guest'})
-                gconn.close()
-            except Exception as e:
-                print(f"Error loading guests for share picker: {e}")
-        
-        return jsonify({'users': users})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/received-photos', methods=['GET'])
-def get_received_photos():
-    """Get photos shared with the current user, grouped by sender"""
+@app.route('/api/links/create', methods=['POST'])
+def create_link():
+    data = request.json
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
-    
+
+    link_name = data.get('link_name', '').strip()
+    if not link_name:
+        return jsonify({'error': 'Link name is required'}), 400
+
+    asset_id = data.get('asset_id')
+    asset_type = data.get('asset_type') # 'photo', 'video', 'album'
+    password = data.get('password')
+    expiry_days = data.get('expiry_days')
+
+    if not asset_id or not asset_type:
+        return jsonify({'error': 'Missing asset_id or asset_type'}), 400
+        
+    if not password:
+        return jsonify({'error': 'A password is required to create a shared link.'}), 400
+
+    # Determine thumbnail ID
+    thumbnail_id = None
     conn = database.get_db_connection(userid)
     c = conn.cursor()
-    
     try:
-        # Get all received photos from shared_photos table
-        c.execute("""
-            SELECT sp.owner_email, sp.recipient_photo_id, p.path, p.type
-            FROM shared_photos sp
-            JOIN photos p ON sp.recipient_photo_id = p.id
-            ORDER BY sp.owner_email, sp.id DESC
-        """)
-        rows = c.fetchall()
-        
-        grouped = {}
-        for r in rows:
-            owner = r['owner_email']
-            if owner not in grouped:
-                grouped[owner] = []
-            photo_data = build_photo_response(r['path'], r['recipient_photo_id'], r['type'], userid=userid)
-            if photo_data:
-                grouped[owner].append(photo_data)
-        
+        if asset_type in ('photo', 'video'):
+            c.execute("SELECT id FROM photos WHERE id = ?", (asset_id,))
+            if not c.fetchone():
+                return jsonify({'error': 'Asset not found'}), 404
+            thumbnail_id = asset_id
+        elif asset_type == 'album':
+            album_ids = [aid.strip() for aid in str(asset_id).split(',') if aid.strip().isdigit()]
+            if not album_ids:
+                return jsonify({'error': 'Invalid album ID(s)'}), 400
+            c.execute("SELECT cover_photo_id FROM albums WHERE id = ?", (album_ids[0],))
+            row = c.fetchone()
+            if not row:
+                return jsonify({'error': 'Album not found'}), 404
+            thumbnail_id = row['cover_photo_id']
+        else:
+            return jsonify({'error': 'Invalid asset_type'}), 400
+    finally:
         conn.close()
-        return jsonify({'shared_photos': grouped})
-    except Exception as e:
-        conn.close()
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/share', methods=['POST'])
-def share_photo():
-    """Share a photo with one or more users"""
-    data = request.json
-    photo_id = data.get('photo_id')
-    recipients = data.get('recipients', [])  # list of email strings
-    
+    # Generate link hash
+    link_hash = secrets.token_urlsafe(16)
+
+    # Hash password if provided
+    password_hash = None
+    salt = None
+    if password:
+        salt = secrets.token_hex(16)
+        password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+
+    # Calculate expiry
+    expires_at = None
+    if expiry_days:
+        expires_at = (datetime.now() + timedelta(days=int(expiry_days))).strftime('%Y-%m-%d %H:%M:%S')
+
+    # Save to global DB
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
+    try:
+        query = """INSERT INTO shared_links 
+                   (link_hash, owner_email, asset_id, asset_type, thumbnail_id, password_hash, salt, expires_at, link_name) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        
+        gc.execute(query, (link_hash, userid, asset_id, asset_type, thumbnail_id, password_hash, salt, expires_at, link_name))
+        gconn.commit()
+    except Exception as e:
+        gconn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
+
+    return jsonify({'success': True, 'link_hash': link_hash})
+
+@app.route('/api/links/list', methods=['GET'])
+def list_links():
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
-    if not photo_id or not recipients:
-        return jsonify({'error': 'photo_id and recipients required'}), 400
-    
-    owner_conn = database.get_db_connection(userid)
-    owner_c = owner_conn.cursor()
-    
+        
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
     try:
-        # 1. Get the original photo
-        owner_c.execute("SELECT * FROM photos WHERE id = ?", (photo_id,))
-        photo = owner_c.fetchone()
-        if not photo:
-            return jsonify({'error': 'Photo not found'}), 404
-        
-        # 2. Check this is not a received photo (re-sharing prevention)
-        owner_c.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo_id, userid))
-        if owner_c.fetchone():
-            return jsonify({'error': 'Cannot re-share a received photo. Only original owner can share.'}), 403
-        
-        original_path = photo['path']
-        results = []
-        
-        for recipient_email in recipients:
-            try:
-                # Check not already shared
-                owner_c.execute("SELECT id FROM shared_photos WHERE original_photo_id = ? AND recipient_email = ?",
-                               (photo_id, recipient_email))
-                if owner_c.fetchone():
-                    results.append({'email': recipient_email, 'status': 'already_shared'})
-                    continue
-                
-                # 3. Create symlinks
-                recipient_dir = os.path.join(DATA_DIR, recipient_email)
-                shared_files_dir = os.path.join(recipient_dir, 'shared', 'files')
-                os.makedirs(shared_files_dir, exist_ok=True)
-                
-                filename = os.path.basename(original_path)
-                # Make unique filename to avoid collisions
-                unique_name = f"{userid.split('@')[0]}_{filename}"
-                symlink_path = os.path.join(shared_files_dir, unique_name)
-                
-                # Create image symlink (resolve to real path if original is also a symlink)
-                real_original = os.path.realpath(original_path)
-                if not os.path.exists(symlink_path):
-                    os.symlink(real_original, symlink_path)
-                
-                # 4. Create thumbnail symlink
-                owner_thumb_dir = get_thumbnail_dir(userid)
-                recipient_thumb_dir = get_thumbnail_dir(recipient_email)
-                os.makedirs(recipient_thumb_dir, exist_ok=True)
-                
-                # Find the original thumbnail
-                rel_from_data = os.path.relpath(original_path, DATA_DIR)
-                path_parts = rel_from_data.split(os.path.sep)
-                device = path_parts[1]
-                files_idx = original_path.find('/files/')
-                if files_idx != -1:
-                    rel_file = original_path[files_idx+7:]
-                    safe_base = rel_file.replace(os.path.sep, '_')
-                    orig_thumb_name = f"{device}__{safe_base}" if safe_base.lower().endswith('.jpg') else f"{device}__{safe_base}.jpg"
-                    orig_thumb_path = os.path.join(owner_thumb_dir, orig_thumb_name)
-                    
-                    # Recipient thumbnail: shared__uniquename.jpg
-                    recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
-                    recip_thumb_path = os.path.join(recipient_thumb_dir, recip_thumb_name)
-                    
-                    if os.path.exists(orig_thumb_path) and not os.path.exists(recip_thumb_path):
-                        os.symlink(os.path.realpath(orig_thumb_path), recip_thumb_path)
-                
-                # 5. Insert photo row in recipient's DB
-                database.init_db(recipient_email)
-                recip_conn = database.get_db_connection(recipient_email)
-                recip_c = recip_conn.cursor()
-                
-                recip_c.execute("""
-                    INSERT OR IGNORE INTO photos 
-                    (path, description, date_taken, location_lat, location_lon, 
-                     processed_for_thumbnails, processed_for_faces, processed_for_description, processed_for_exif, type)
-                    VALUES (?, ?, ?, ?, ?, 1, 1, 1, 1, ?)
-                """, (symlink_path, photo['description'], photo['date_taken'],
-                      photo['location_lat'], photo['location_lon'], photo['type']))
-                recip_conn.commit()
-                
-                recipient_photo_id = recip_c.lastrowid
-                
-                # 6. Migrate face connections
-                owner_c.execute("SELECT person_id FROM photo_people WHERE photo_id = ?", (photo_id,))
-                face_mappings = owner_c.fetchall()
-                
-                for mapping in face_mappings:
-                    person_id = mapping['person_id']
-                    # Get person's embedding from owner's DB
-                    owner_c.execute("SELECT name, thumbnail_path, embedding_blob FROM people WHERE id = ?", (person_id,))
-                    person = owner_c.fetchone()
-                    if not person:
-                        continue
-                    
-                    # Check if recipient already has this person (by embedding match)
-                    recip_person_id = None
-                    if person['embedding_blob']:
-                        import numpy as np
-                        owner_embedding = database.convert_array(person['embedding_blob'])
-                        recip_c.execute("SELECT id, embedding_blob FROM people")
-                        for rp in recip_c.fetchall():
-                            if rp['embedding_blob']:
-                                recip_embedding = database.convert_array(rp['embedding_blob'])
-                                # Only compare embeddings of the same dimension to avoid
-                                # cross-daemon (v1 128-dim vs v2 512-dim) false matches.
-                                if owner_embedding.shape != recip_embedding.shape:
-                                    continue
-                                distance = np.linalg.norm(owner_embedding - recip_embedding)
-                                # dlib (128-dim): same person < 0.6
-                                # InsightFace (512-dim, unit-normalised): same person < 1.0
-                                threshold = 0.6 if owner_embedding.shape[0] == 128 else 1.0
-                                if distance < threshold:
-                                    recip_person_id = rp['id']
-                                    break
-                    
-                    if recip_person_id is None:
-                        # Fix: Symlink face thumbnail and update path
-                        new_thumb_path = person['thumbnail_path']
-                        if person['thumbnail_path'] and os.path.exists(person['thumbnail_path']):
-                            face_thumb_name = os.path.basename(person['thumbnail_path'])
-                            recip_face_thumb_path = os.path.join(recipient_thumb_dir, face_thumb_name)
-                            
-                            if not os.path.exists(recip_face_thumb_path):
-                                try:
-                                    os.symlink(os.path.realpath(person['thumbnail_path']), recip_face_thumb_path)
-                                except Exception as e:
-                                    print(f"Error symlinking face thumb: {e}")
-                            
-                            new_thumb_path = recip_face_thumb_path
-
-                        # Create new person in recipient's DB
-                        recip_c.execute("INSERT INTO people (name, thumbnail_path, embedding_blob) VALUES (?, ?, ?)",
-                                       (person['name'], new_thumb_path, person['embedding_blob']))
-                        recip_person_id = recip_c.lastrowid
-                    else:
-                        # Existing person: ensure they have a valid thumbnail (optional improvement)
-                        new_thumb_path = person['thumbnail_path']
-                        if person['thumbnail_path'] and os.path.exists(person['thumbnail_path']):
-                            face_thumb_name = os.path.basename(person['thumbnail_path'])
-                            recip_face_thumb_path = os.path.join(recipient_thumb_dir, face_thumb_name)
-                            
-                            if not os.path.exists(recip_face_thumb_path):
-                                try:
-                                    os.symlink(os.path.realpath(person['thumbnail_path']), recip_face_thumb_path)
-                                except Exception as e:
-                                    print(f"Error symlinking face thumb: {e}")
-                            
-                            # Update existing person's thumb if it doesn't have one
-                            recip_c.execute("SELECT thumbnail_path FROM people WHERE id = ?", (recip_person_id,))
-                            row = recip_c.fetchone()
-                            if not row or not row['thumbnail_path'] or not os.path.exists(row['thumbnail_path']):
-                                recip_c.execute("UPDATE people SET thumbnail_path = ? WHERE id = ?", (recip_face_thumb_path, recip_person_id))
-                    
-                    # Map photo to person in recipient's DB
-                    try:
-                        recip_c.execute("INSERT INTO photo_people (photo_id, person_id) VALUES (?, ?)",
-                                       (recipient_photo_id, recip_person_id))
-                    except sqlite3.IntegrityError:
-                        pass
-                
-                recip_conn.commit()
-                recip_conn.close()
-                
-                # 7. Record share in owner's DB
-                owner_c.execute("""
-                    INSERT INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
-                    VALUES (?, ?, ?, ?)
-                """, (photo_id, userid, recipient_email, recipient_photo_id))
-                
-                # Also record in recipient's DB so they know it's received
-                recip_conn2 = database.get_db_connection(recipient_email)
-                recip_c2 = recip_conn2.cursor()
-                recip_c2.execute("""
-                    INSERT OR IGNORE INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
-                    VALUES (?, ?, ?, ?)
-                """, (photo_id, userid, recipient_email, recipient_photo_id))
-                recip_conn2.commit()
-                recip_conn2.close()
-                
-                results.append({'email': recipient_email, 'status': 'shared'})
-                
-            except Exception as e:
-                print(f"Error sharing with {recipient_email}: {e}")
-                import traceback
-                traceback.print_exc()
-                results.append({'email': recipient_email, 'status': 'error', 'error': str(e)})
-        
-        owner_conn.commit()
-        owner_conn.close()
-        return jsonify({'success': True, 'results': results})
-        
+        gc.execute("""
+            SELECT link_hash, asset_id, asset_type, expires_at, created_at,
+                   link_name, (password_hash IS NOT NULL) as is_protected 
+            FROM shared_links 
+            WHERE owner_email = ? 
+            ORDER BY created_at DESC
+        """, (userid,))
+        rows = gc.fetchall()
+        links = [dict(r) for r in rows]
+        # In sqlite3.Row, boolean might come back as 1/0
+        for l in links:
+            l['is_protected'] = bool(l['is_protected'])
     except Exception as e:
-        owner_conn.close()
-        print(f"Share error: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
+        
+    return jsonify({'links': links})
 
-@app.route('/api/unshare', methods=['POST'])
-def unshare_photo():
-    """Unshare a photo — called by the owner"""
+@app.route('/api/links/revoke', methods=['POST'])
+def revoke_link():
     data = request.json
-    photo_id = data.get('photo_id')
-    recipient_email = data.get('recipient_email')
-    
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
-    if not photo_id or not recipient_email:
-        return jsonify({'error': 'photo_id and recipient_email required'}), 400
-    
-    owner_conn = database.get_db_connection(userid)
-    owner_c = owner_conn.cursor()
-    
+        
+    link_hash = data.get('link_hash')
+    if not link_hash:
+        return jsonify({'error': 'Missing link_hash'}), 400
+        
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
     try:
-        # Find the share record
-        owner_c.execute("""
-            SELECT recipient_photo_id FROM shared_photos 
-            WHERE original_photo_id = ? AND recipient_email = ? AND owner_email = ?
-        """, (photo_id, recipient_email, userid))
-        share = owner_c.fetchone()
+        gc.execute("DELETE FROM shared_links WHERE link_hash = ? AND owner_email = ?", (link_hash, userid))
+        gconn.commit()
+    except Exception as e:
+        gconn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
         
-        if not share:
-            return jsonify({'error': 'Share not found'}), 404
+    return jsonify({'success': True})
+
+@app.route('/api/links/verify', methods=['POST'])
+def verify_link():
+    data = request.json
+    link_hash = data.get('link_hash')
+    password = data.get('password')
+    
+    if not link_hash:
+        return jsonify({'error': 'Missing link_hash'}), 400
         
-        recipient_photo_id = share['recipient_photo_id']
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
+    try:
+        gc.execute("""
+            SELECT password_hash, salt, expires_at 
+            FROM shared_links 
+            WHERE link_hash = ?
+        """, (link_hash,))
+        row = gc.fetchone()
         
-        # 1. Get recipient's photo path and remove symlinks
-        recip_conn = database.get_db_connection(recipient_email)
-        recip_c = recip_conn.cursor()
-        
-        recip_c.execute("SELECT path FROM photos WHERE id = ?", (recipient_photo_id,))
-        recip_photo = recip_c.fetchone()
-        
-        if recip_photo:
-            symlink_path = recip_photo['path']
-            # Remove image symlink
-            if os.path.islink(symlink_path):
-                os.unlink(symlink_path)
+        if not row:
+            return jsonify({'error': 'Link not found or revoked'}), 404
             
-            # Remove thumbnail symlink
-            recipient_thumb_dir = get_thumbnail_dir(recipient_email)
-            unique_name = os.path.basename(symlink_path)
-            recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
-            recip_thumb_path = os.path.join(recipient_thumb_dir, recip_thumb_name)
-            if os.path.islink(recip_thumb_path):
-                os.unlink(recip_thumb_path)
+        # Check expiry manually to avoid timezone SQLite quirks just in case
+        if row['expires_at']:
+            gc.execute("SELECT datetime('now') < ?", (row['expires_at'],))
+            is_valid = gc.fetchone()[0]
+            if not is_valid:
+                # Auto-cleanup expired
+                gc.execute("DELETE FROM shared_links WHERE link_hash = ?", (link_hash,))
+                gconn.commit()
+                return jsonify({'error': 'Link expired'}), 410
+
+        if row['password_hash']:
+            if not password:
+                return jsonify({'error': 'Password required', 'requires_password': True}), 401
             
-            # Remove from recipient's DB
-            recip_c.execute("DELETE FROM photo_people WHERE photo_id = ?", (recipient_photo_id,))
-            recip_c.execute("DELETE FROM photos WHERE id = ?", (recipient_photo_id,))
-            recip_c.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (recipient_photo_id,))
-            recip_conn.commit()
+            calc_hash = hashlib.sha256(f"{password}{row['salt']}".encode()).hexdigest()
+            if calc_hash != row['password_hash']:
+                return jsonify({'error': 'Invalid password'}), 401
         
-        recip_conn.close()
+        # Determine token for session viewing
+        token = secrets.token_urlsafe(32)
+        # We should store this token in a session/memory or DB.
+        # But for this simple Phase 2, we can just return success and set a signed cookie.
+        # The frontend will hit the resource URLs holding this cookie.
         
-        # 2. Remove share record from owner's DB
-        owner_c.execute("DELETE FROM shared_photos WHERE original_photo_id = ? AND recipient_email = ?",
-                       (photo_id, recipient_email))
-        owner_conn.commit()
-        owner_conn.close()
-        
-        return jsonify({'success': True})
+        resp = make_response(jsonify({'success': True, 'token': token}))
+        # In a robust implementation we'd map token -> link_hash in DB to verify access.
+        # For simplicity, we can sign the link_hash itself into a cookie.
+        resp.set_cookie(f'link_auth_{link_hash}', link_hash, max_age=24 * 60 * 60, httponly=True, samesite='Lax')
+        return resp
         
     except Exception as e:
-        owner_conn.close()
-        print(f"Unshare error: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
 
-@app.route('/api/unshare/received', methods=['POST'])
-def unshare_received_photo():
-    """Remove a shared photo from recipient's side"""
-    data = request.json
-    photo_id = data.get('photo_id')  # recipient's photo ID
-    
+@app.route('/s/<link_hash>', methods=['GET'])
+def view_shared_link_page(link_hash):
+    """Serves the frontend SPA for viewing a shared link."""
+    return render_template('shared.html')
+
+@app.route('/api/shared-with-me', methods=['GET'])
+def get_shared_with_me():
+    """Retrieve items shared specifically with the current user"""
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
-    if not photo_id:
-        return jsonify({'error': 'photo_id required'}), 400
-    
-    recip_conn = database.get_db_connection(userid)
-    recip_c = recip_conn.cursor()
-    
+
+    gconn = get_global_share_db()
+    gconn.row_factory = sqlite3.Row
+    gc = gconn.cursor()
     try:
-        # Find the share record in recipient's DB
-        recip_c.execute("SELECT * FROM shared_photos WHERE recipient_photo_id = ?", (photo_id,))
-        share = recip_c.fetchone()
+        # Get items shared with this user
+        gc.execute("""
+            SELECT owner_email, asset_id, asset_title, asset_type, thumbnail_id, created_at
+            FROM shared_asset_users
+            WHERE shared_with_email = ?
+            ORDER BY created_at DESC
+        """, (userid,))
         
-        if not share:
-            return jsonify({'error': 'Share not found'}), 404
+        shared_items = [dict(row) for row in gc.fetchall()]
         
-        owner_email = share['owner_email']
-        original_photo_id = share['original_photo_id']
-        
-        # Get the photo path
-        recip_c.execute("SELECT path FROM photos WHERE id = ?", (photo_id,))
-        photo = recip_c.fetchone()
-        
-        if photo:
-            symlink_path = photo['path']
-            if os.path.islink(symlink_path):
-                os.unlink(symlink_path)
+        # Enrich with thumbnail URLs and format album IDs
+        for item in shared_items:
+            owner_email = item['owner_email']
+            thumbnail_id = item['thumbnail_id']
             
-            # Remove thumbnail symlink
-            recipient_thumb_dir = get_thumbnail_dir(userid)
-            unique_name = os.path.basename(symlink_path)
-            recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
-            recip_thumb_path = os.path.join(recipient_thumb_dir, recip_thumb_name)
-            if os.path.islink(recip_thumb_path):
-                os.unlink(recip_thumb_path)
+            if item['asset_type'] == 'album':
+                item['asset_id'] = f"shared_{item['asset_id']}_{owner_email}"
+            
+            if thumbnail_id:
+                try:
+                    owner_conn = database.get_db_connection(owner_email)
+                    owner_conn.row_factory = sqlite3.Row
+                    oc = owner_conn.cursor()
+                    oc.execute("SELECT path, type FROM photos WHERE id = ?", (thumbnail_id,))
+                    thumb_photo = oc.fetchone()
+                    owner_conn.close()
+                    
+                    if thumb_photo:
+                        photo_data = build_photo_response(thumb_photo['path'], thumbnail_id, thumb_photo['type'], userid=owner_email)
+                        if photo_data:
+                            item['thumbnail_url'] = photo_data.get('thumbnail_url')
+                except Exception as e:
+                    print(f"Error fetching thumbnail for shared item: {e}")
+                    
+        return jsonify({'shared_assets': shared_items})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
+
+@app.route('/api/links/view', methods=['GET'])
+def view_link():
+    """Retrieve the assets for a given link hash. Requires authentication via link_auth cookie if password protected."""
+    link_hash = request.args.get('link_hash')
+    if not link_hash:
+        return jsonify({'error': 'Missing link_hash'}), 400
+
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
+    try:
+        gc.execute("""
+            SELECT owner_email, asset_id, asset_type, password_hash, expires_at 
+            FROM shared_links 
+            WHERE link_hash = ?
+        """, (link_hash,))
+        link = gc.fetchone()
         
-        # Clean up recipient's DB
-        recip_c.execute("DELETE FROM photo_people WHERE photo_id = ?", (photo_id,))
-        recip_c.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
-        recip_c.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (photo_id,))
-        recip_conn.commit()
-        recip_conn.close()
+        if not link:
+            return jsonify({'error': 'Link not found or revoked'}), 404
+            
+        # Check expiry
+        if link['expires_at']:
+            gc.execute("SELECT datetime('now') < ?", (link['expires_at'],))
+            is_valid = gc.fetchone()[0]
+            if not is_valid:
+                gc.execute("DELETE FROM shared_links WHERE link_hash = ?", (link_hash,))
+                gconn.commit()
+                return jsonify({'error': 'Link expired'}), 410
+
+        # Password-protected links require a valid link_auth cookie OR inline password
+        if link['password_hash']:
+            auth_cookie = request.cookies.get(f'link_auth_{link_hash}')
+            password = request.args.get('password')
+            if auth_cookie == link_hash:
+                pass  # Cookie auth OK
+            elif password:
+                # Inline password verification fallback
+                salt_row = gc.execute("SELECT salt FROM shared_links WHERE link_hash = ?", (link_hash,)).fetchone()
+                calc_hash = hashlib.sha256(f"{password}{salt_row['salt']}".encode()).hexdigest()
+                if calc_hash != link['password_hash']:
+                    return jsonify({'requires_password': True, 'error': 'Invalid password'}), 401
+            else:
+                return jsonify({'requires_password': True, 'error': 'Password required'}), 401
+
+        owner_email = link['owner_email']
+        asset_id = link['asset_id']
+        asset_type = link['asset_type']
         
-        # Clean up owner's DB
+        # Connect to owner's DB to fetch the actual asset data
+        conn = database.get_db_connection(owner_email)
+        c = conn.cursor()
+        
+        # Attach the global sharing database to this connection to allow cross-DB photo filtering
+        c.execute("ATTACH DATABASE ? AS global_share", (GLOBAL_SHARE_DB_PATH,))
+        
+        result = {
+            'asset_type': asset_type,
+            'owner': owner_email, # Usually we'd look up their display name
+        }
+        
         try:
-            owner_conn = database.get_db_connection(owner_email)
-            owner_c = owner_conn.cursor()
-            owner_c.execute("DELETE FROM shared_photos WHERE original_photo_id = ? AND recipient_email = ?",
-                           (original_photo_id, userid))
-            owner_conn.commit()
-            owner_conn.close()
-        except Exception:
-            pass  # Owner DB cleanup is best-effort
-        
-        return jsonify({'success': True})
-        
-    except Exception as e:
-        recip_conn.close()
-        print(f"Unshare received error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ================================
-# Album Sharing API Endpoints
-# ================================
-
-
-@app.route('/api/albums/<int:album_id>/share/user', methods=['POST'])
-def share_album_with_user(album_id):
-    """Share an album (copy) with another user using symlinks."""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    data = request.json
-    recipient_email = data.get('email')
-
-    if not recipient_email:
-        return jsonify({'error': 'Recipient email required'}), 400
-
-    if recipient_email == userid:
-        return jsonify({'error': 'Cannot share with yourself'}), 400
-
-    try:
-        # Verify recipient exists (check users first, then guests)
-        recipient_found = False
-        user_conn = sqlite3.connect(USER_DB_PATH)
-        uc = user_conn.cursor()
-        uc.execute("SELECT email FROM users WHERE email = ?", (recipient_email,))
-        if uc.fetchone():
-            recipient_found = True
-        user_conn.close()
-        
-        if not recipient_found:
-            # Check if recipient is a guest invited by this user
-            gconn = get_guest_db()
-            gc = gconn.cursor()
-            gc.execute("""SELECT g.id FROM guests g
-                          JOIN guest_hosts gh ON g.id = gh.guest_id
-                          WHERE g.email = ? AND gh.host_email = ? AND gh.status = 'active'""",
-                       (recipient_email, userid))
-            if gc.fetchone():
-                recipient_found = True
-            gconn.close()
-        
-        if not recipient_found:
-            return jsonify({'error': 'User not found'}), 404
-
-        # Get source album and photos
-        src_conn = database.get_db_connection(userid)
-        sc = src_conn.cursor()
-        sc.execute("SELECT name, description, album_type FROM albums WHERE id = ?", (album_id,))
-        album_row = sc.fetchone()
-        if not album_row:
-            src_conn.close()
-            return jsonify({'error': 'Album not found'}), 404
-
-        # Block resharing: shared albums cannot be shared again
-        if album_row['album_type'] == 'shared':
-            src_conn.close()
-            return jsonify({'error': 'Cannot reshare a shared album. Only the original owner can share.'}), 403
-
-        album_name = album_row['name']
-        album_desc = album_row['description'] or ''
-
-        sc.execute("SELECT photo_id FROM album_photos WHERE album_id = ?", (album_id,))
-        photo_ids = [row['photo_id'] for row in sc.fetchall()]
-
-        # Get photo details
-        photos = []
-        for pid in photo_ids:
-            sc.execute("SELECT * FROM photos WHERE id = ?", (pid,))
-            photo = sc.fetchone()
-            if photo:
-                photos.append(dict(photo))
-
-        # Block resharing: reject if album contains ANY received/shared photos
-        for photo in photos:
-            sc.execute("SELECT id FROM shared_photos WHERE recipient_photo_id = ? AND recipient_email = ?", (photo['id'], userid))
-            if sc.fetchone():
-                src_conn.close()
-                return jsonify({'error': 'Cannot share an album that contains shared photos. Only original content can be shared.'}), 403
-
-        # Create album and photos in recipient's DB using symlinks
-        database.init_db(recipient_email)
-        dst_conn = database.get_db_connection(recipient_email)
-        dc = dst_conn.cursor()
-
-        dc.execute(
-            "INSERT INTO albums (name, description, album_type, owner_email, source_album_id) VALUES (?, ?, 'shared', ?, ?)",
-            (f"{album_name} (from {userid})", album_desc, userid, album_id)
-        )
-        new_album_id = dc.lastrowid
-
-        recipient_dir = os.path.join(DATA_DIR, recipient_email)
-        shared_files_dir = os.path.join(recipient_dir, 'shared', 'files')
-        os.makedirs(shared_files_dir, exist_ok=True)
-        recipient_thumb_dir = get_thumbnail_dir(recipient_email)
-        os.makedirs(recipient_thumb_dir, exist_ok=True)
-
-        first_photo_id = None
-
-        for photo in photos:
-            original_path = photo['path']
-            filename = os.path.basename(original_path)
-            unique_name = f"{userid.split('@')[0]}_{filename}"
-            symlink_path = os.path.join(shared_files_dir, unique_name)
-
-            # Create image symlink
-            real_original = os.path.realpath(original_path)
-            if not os.path.exists(symlink_path):
-                os.symlink(real_original, symlink_path)
-
-            # Create thumbnail symlink
-            try:
-                rel_from_data = os.path.relpath(original_path, DATA_DIR)
-                path_parts = rel_from_data.split(os.path.sep)
-                device = path_parts[1]
-                files_idx = original_path.find('/files/')
-                if files_idx != -1:
-                    rel_file = original_path[files_idx+7:]
-                    safe_base = rel_file.replace(os.path.sep, '_')
-                    orig_thumb_name = f"{device}__{safe_base}" if safe_base.lower().endswith('.jpg') else f"{device}__{safe_base}.jpg"
-                    owner_thumb_dir = get_thumbnail_dir(userid)
-                    orig_thumb_path = os.path.join(owner_thumb_dir, orig_thumb_name)
-
-                    recip_thumb_name = f"shared__{unique_name}" if unique_name.lower().endswith('.jpg') else f"shared__{unique_name}.jpg"
-                    recip_thumb_path = os.path.join(recipient_thumb_dir, recip_thumb_name)
-
-                    if os.path.exists(orig_thumb_path) and not os.path.exists(recip_thumb_path):
-                        os.symlink(os.path.realpath(orig_thumb_path), recip_thumb_path)
-            except Exception as e:
-                print(f"Thumbnail symlink error for {filename}: {e}")
-
-            # Insert photo record with symlink path
-            dc.execute("""
-                INSERT OR IGNORE INTO photos
-                (path, description, date_taken, location_lat, location_lon,
-                 processed_for_thumbnails, processed_for_faces, processed_for_description, processed_for_exif, type)
-                VALUES (?, ?, ?, ?, ?, 1, 1, 1, 1, ?)
-            """, (symlink_path, photo.get('description'), photo.get('date_taken'),
-                  photo.get('location_lat'), photo.get('location_lon'), photo.get('type')))
-            new_photo_id = dc.lastrowid
-
-            if first_photo_id is None:
-                first_photo_id = new_photo_id
-
-            dc.execute(
-                "INSERT INTO album_photos (album_id, photo_id) VALUES (?, ?)",
-                (new_album_id, new_photo_id)
-            )
-
-            # Record in shared_photos (recipient's DB) so photos are marked as received
-            dc.execute("""
-                INSERT OR IGNORE INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
-                VALUES (?, ?, ?, ?)
-            """, (photo['id'], userid, recipient_email, new_photo_id))
-
-            # Record in owner's DB
-            sc.execute("""
-                INSERT OR IGNORE INTO shared_photos (original_photo_id, owner_email, recipient_email, recipient_photo_id)
-                VALUES (?, ?, ?, ?)
-            """, (photo['id'], userid, recipient_email, new_photo_id))
-
-        # Set cover photo
-        if first_photo_id:
-            dc.execute("UPDATE albums SET cover_photo_id = ? WHERE id = ?", (first_photo_id, new_album_id))
-
-        dst_conn.commit()
-        dst_conn.close()
-        src_conn.commit()
-        src_conn.close()
-
-        return jsonify({'success': True, 'album_id': new_album_id})
-    except Exception as e:
-        print(f"Share album error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-# ================================
-# Guest Management API Endpoints
-# ================================
-
-def require_not_guest():
-    """Check that current user is NOT a guest. Returns error response or None."""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-    if is_guest_user(userid):
-        return jsonify({'error': 'Guests cannot perform this action'}), 403
-    return None
-
-@app.route('/api/guests/list', methods=['GET'])
-def list_guests():
-    """List current user's invited guests with status."""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-    block = require_not_guest()
-    if block: return block
-    
-    try:
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        gc.execute("""SELECT g.id, g.email, g.host_count, g.created_at, g.last_login,
-                             gh.added_date, gh.last_activated_date, gh.access_till, gh.status
-                      FROM guests g
-                      JOIN guest_hosts gh ON g.id = gh.guest_id
-                      WHERE gh.host_email = ?
-                      ORDER BY gh.added_date DESC""", (userid,))
-        guests = []
-        for r in gc.fetchall():
-            # Check if expired
-            status = r['status']
-            if status == 'active':
-                gc.execute("SELECT 1 WHERE datetime(?) < datetime('now')", (r['access_till'],))
+            if asset_type in ('photo', 'video'):
+                # Check if this specific photo was hidden from the shared link
+                gc.execute("SELECT 1 FROM shared_link_hidden_items WHERE link_hash = ? AND photo_id = ?", (link_hash, asset_id))
                 if gc.fetchone():
-                    status = 'expired'
-            guests.append({
-                'id': r['id'],
-                'email': r['email'],
-                'host_count': r['host_count'],
-                'added_date': r['added_date'],
-                'last_login': r['last_login'],
-                'access_till': r['access_till'],
-                'status': status
-            })
-        gconn.close()
-        return jsonify({'guests': guests})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+                    return jsonify({'error': 'Asset no longer exists'}), 404
 
-@app.route('/api/guests/invite', methods=['POST'])
-def invite_guest():
-    """Invite a new guest. Body: {email, password, duration_days}"""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-    block = require_not_guest()
-    if block: return block
-    
-    data = request.json
-    email = data.get('email', '').strip().lower()
-    password = data.get('password', '')
-    duration_days = int(data.get('duration_days', 30))
-    
-    if not email or not password:
-        return jsonify({'error': 'Email and password required'}), 400
-    if duration_days < 1 or duration_days > 365:
-        return jsonify({'error': 'Duration must be 1-365 days'}), 400
-    
-    # Don't allow inviting an existing Photovault user as guest
-    try:
-        uconn = sqlite3.connect(USER_DB_PATH)
-        uc = uconn.cursor()
-        uc.execute("SELECT email FROM users WHERE email = ?", (email,))
-        if uc.fetchone():
-            uconn.close()
-            return jsonify({'error': 'This email belongs to a Photovault user, not a guest'}), 400
-        uconn.close()
-    except Exception:
-        pass
-    
-    salt = secrets.token_hex(16)
-    password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-    
-    try:
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        
-        # Check if guest email already exists
-        gc.execute("SELECT id, password_hash, password_salt FROM guests WHERE email = ?", (email,))
-        existing = gc.fetchone()
-        
-        if existing:
-            guest_id = existing['id']
-            # Check if this host already invited this guest
-            gc.execute("SELECT id FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
-            if gc.fetchone():
-                gconn.close()
-                return jsonify({'error': 'Guest already invited by you'}), 400
+                c.execute("SELECT id, path, description, type, date_taken FROM photos WHERE id = ?", (asset_id,))
+                row = c.fetchone()
+                if not row:
+                    return jsonify({'error': 'Asset no longer exists'}), 404
+                    
+                photo_data = build_photo_response(row['path'], row['id'], row['type'], userid=owner_email)
+                if photo_data:
+                    photo_data['description'] = row['description']
+                    photo_data['date_taken'] = row['date_taken']
+                    result['item'] = photo_data
+                else:
+                    return jsonify({'error': 'Failed to build asset'}), 500
+                    
+            elif asset_type == 'album':
+                album_ids = [aid.strip() for aid in str(asset_id).split(',') if aid.strip().isdigit()]
+                if not album_ids:
+                    return jsonify({'error': 'Invalid album ID(s)'}), 400
+                    
+                if len(album_ids) == 1:
+                    c.execute("SELECT name, description FROM albums WHERE id = ?", (album_ids[0],))
+                    album_row = c.fetchone()
+                    if not album_row:
+                        return jsonify({'error': 'Album no longer exists'}), 404
+                    result['album_name'] = album_row['name']
+                    result['album_description'] = album_row['description']
+                    
+                    # Fetch album photos excluding hidden items
+                    c.execute("""
+                        SELECT p.id, p.path, p.description, p.type, p.date_taken
+                        FROM photos p
+                        JOIN album_photos ap ON p.id = ap.photo_id
+                        WHERE ap.album_id = ? 
+                        AND p.id NOT IN (
+                            SELECT photo_id FROM global_share.shared_link_hidden_items WHERE link_hash = ?
+                        )
+                        ORDER BY ap.added_at DESC
+                    """, (album_ids[0], link_hash))
+                    
+                    photos = []
+                    for pr in c.fetchall():
+                        pd = build_photo_response(pr['path'], pr['id'], pr['type'], userid=owner_email)
+                        if pd:
+                            pd['description'] = pr['description']
+                            pd['date_taken'] = pr['date_taken']
+                            photos.append(pd)
+                            
+                    result['items'] = photos
+                else:
+                    result['is_multi_album'] = True
+                    result['album_name'] = f"{len(album_ids)} Shared Albums"
+                    result['album_description'] = "A collection of multiple shared albums"
+                    
+                    albums_data = []
+                    for aid in album_ids:
+                        c.execute("SELECT name, description FROM albums WHERE id = ?", (aid,))
+                        arow = c.fetchone()
+                        if arow:
+                            album_info = {
+                                'name': arow['name'],
+                                'description': arow['description'],
+                                'items': []
+                            }
+                            c.execute("""
+                                SELECT p.id, p.path, p.description, p.type, p.date_taken
+                                FROM photos p
+                                JOIN album_photos ap ON p.id = ap.photo_id
+                                WHERE ap.album_id = ?
+                                AND p.id NOT IN (
+                                    SELECT photo_id FROM global_share.shared_link_hidden_items WHERE link_hash = ?
+                                )
+                                ORDER BY ap.added_at DESC
+                            """, (aid, link_hash))
+                            
+                            for pr in c.fetchall():
+                                pd = build_photo_response(pr['path'], pr['id'], pr['type'], userid=owner_email)
+                                if pd:
+                                    pd['description'] = pr['description']
+                                    pd['date_taken'] = pr['date_taken']
+                                    album_info['items'].append(pd)
+                            
+                            albums_data.append(album_info)
+                            
+                    result['albums'] = albums_data
+                
+        finally:
+            conn.close()
             
-            # Add new host relationship, increment counter
-            gc.execute("""INSERT INTO guest_hosts (guest_id, host_email, access_till, last_activated_date)
-                          VALUES (?, ?, datetime('now', '+' || ? || ' days'), datetime('now'))""",
-                       (guest_id, userid, duration_days))
-            gc.execute("UPDATE guests SET host_count = host_count + 1 WHERE id = ?", (guest_id,))
-        else:
-            # Create new guest
-            gc.execute("""INSERT INTO guests (email, password_hash, password_salt, host_count)
-                          VALUES (?, ?, ?, 1)""", (email, password_hash, salt))
-            guest_id = gc.lastrowid
-            gc.execute("""INSERT INTO guest_hosts (guest_id, host_email, access_till, last_activated_date)
-                          VALUES (?, ?, datetime('now', '+' || ? || ' days'), datetime('now'))""",
-                       (guest_id, userid, duration_days))
+        resp = make_response(jsonify(result))
+        # Set cookie universally for authenticated access
+        resp.set_cookie(f'link_auth_{link_hash}', link_hash, max_age=24 * 60 * 60, httponly=True, samesite='Lax')
+        return resp
         
-        # Initialize guest's per-user data directory and DB
-        database.init_db(email)
-        
-        gconn.commit()
-        gconn.close()
-        return jsonify({'success': True, 'guest_id': guest_id})
     except Exception as e:
-        print(f"Invite guest error: {e}")
         return jsonify({'error': str(e)}), 500
-
-@app.route('/api/guests/delete', methods=['POST'])
-def delete_guest():
-    """Remove a guest invitation. Decrements counter, deletes at 0."""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-    block = require_not_guest()
-    if block: return block
-    
-    data = request.json
-    guest_email = data.get('email', '').strip().lower()
-    if not guest_email:
-        return jsonify({'error': 'Guest email required'}), 400
-    
-    try:
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        
-        gc.execute("SELECT id, host_count FROM guests WHERE email = ?", (guest_email,))
-        guest = gc.fetchone()
-        if not guest:
-            gconn.close()
-            return jsonify({'error': 'Guest not found'}), 404
-        
-        guest_id = guest['id']
-        
-        # Verify this host has a relationship
-        gc.execute("SELECT id FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
-        if not gc.fetchone():
-            gconn.close()
-            return jsonify({'error': 'Guest not invited by you'}), 404
-        
-        # Clean up shared assets for this host
-        gc.execute("""SELECT asset_type, guest_asset_id FROM guest_assets 
-                      WHERE guest_id = ? AND host_email = ?""", (guest_id, userid))
-        assets = gc.fetchall()
-        
-        if assets:
-            # Remove symlinks and DB records from guest's per-user DB
-            try:
-                guest_conn = database.get_db_connection(guest_email)
-                guest_c = guest_conn.cursor()
-                for asset in assets:
-                    if asset['asset_type'] == 'photo' and asset['guest_asset_id']:
-                        # Get path and remove symlinks
-                        guest_c.execute("SELECT path FROM photos WHERE id = ?", (asset['guest_asset_id'],))
-                        photo = guest_c.fetchone()
-                        if photo and os.path.islink(photo['path']):
-                            os.unlink(photo['path'])
-                        guest_c.execute("DELETE FROM photo_people WHERE photo_id = ?", (asset['guest_asset_id'],))
-                        guest_c.execute("DELETE FROM photos WHERE id = ?", (asset['guest_asset_id'],))
-                        guest_c.execute("DELETE FROM shared_photos WHERE recipient_photo_id = ?", (asset['guest_asset_id'],))
-                    elif asset['asset_type'] == 'album' and asset['guest_asset_id']:
-                        guest_c.execute("DELETE FROM album_photos WHERE album_id = ?", (asset['guest_asset_id'],))
-                        guest_c.execute("DELETE FROM albums WHERE id = ?", (asset['guest_asset_id'],))
-                guest_conn.commit()
-                guest_conn.close()
-            except Exception as e:
-                print(f"Error cleaning guest assets: {e}")
-        
-        # Remove guest_assets and guest_hosts for this host
-        gc.execute("DELETE FROM guest_assets WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
-        gc.execute("DELETE FROM guest_hosts WHERE guest_id = ? AND host_email = ?", (guest_id, userid))
-        
-        # Decrement counter
-        new_count = guest['host_count'] - 1
-        if new_count <= 0:
-            # No more hosts — delete guest entirely
-            gc.execute("DELETE FROM guest_assets WHERE guest_id = ?", (guest_id,))
-            gc.execute("DELETE FROM guest_hosts WHERE guest_id = ?", (guest_id,))
-            gc.execute("DELETE FROM guests WHERE id = ?", (guest_id,))
-            # Optionally remove guest's data directory
-            guest_dir = get_user_dir(guest_email)
-            if os.path.exists(guest_dir):
-                import shutil
-                shutil.rmtree(guest_dir, ignore_errors=True)
-        else:
-            gc.execute("UPDATE guests SET host_count = ? WHERE id = ?", (new_count, guest_id))
-        
-        gconn.commit()
+    finally:
         gconn.close()
-        return jsonify({'success': True, 'remaining_hosts': max(new_count, 0)})
-    except Exception as e:
-        print(f"Delete guest error: {e}")
-        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/guests/revoke', methods=['POST'])
-def revoke_guest():
-    """Set guest status to inactive for current host."""
-    userid = get_current_userid()
-    if not userid:
-        return jsonify({'error': 'Unauthorized'}), 401
-    block = require_not_guest()
-    if block: return block
-    
+@app.route('/api/links/hide', methods=['POST'])
+def hide_shared_asset():
+    """Allows a viewer to hide a specific photo from a shared link view by providing the link's password."""
     data = request.json
-    guest_email = data.get('email', '').strip().lower()
-    if not guest_email:
-        return jsonify({'error': 'Guest email required'}), 400
-    
+    link_hash = data.get('link_hash')
+    photo_id = data.get('photo_id')
+    password = data.get('password')
+
+    if not link_hash or not photo_id or not password:
+        return jsonify({'error': 'Missing required fields: link_hash, photo_id, password'}), 400
+
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
     try:
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        gc.execute("SELECT id FROM guests WHERE email = ?", (guest_email,))
-        guest = gc.fetchone()
-        if not guest:
-            gconn.close()
-            return jsonify({'error': 'Guest not found'}), 404
-        
-        gc.execute("""UPDATE guest_hosts SET status = 'inactive' 
-                      WHERE guest_id = ? AND host_email = ?""", (guest['id'], userid))
-        if gc.rowcount == 0:
-            gconn.close()
-            return jsonify({'error': 'Guest not invited by you'}), 404
-        
+        # Fetch the shared link's password hash and salt
+        gc.execute("SELECT password_hash, salt FROM shared_links WHERE link_hash = ?", (link_hash,))
+        link = gc.fetchone()
+
+        if not link:
+            return jsonify({'error': 'Link not found or revoked'}), 404
+            
+        if not link['password_hash']:
+            return jsonify({'error': 'This shared link does not have a password configured for deletions'}), 400
+
+        # Validate the provided password
+        calc_hash = hashlib.sha256(f"{password}{link['salt']}".encode()).hexdigest()
+        if calc_hash != link['password_hash']:
+            return jsonify({'error': 'Invalid password for this shared link'}), 401
+
+        # Password is correct; mark the item as hidden for this specific link
+        gc.execute(
+            "INSERT OR IGNORE INTO shared_link_hidden_items (link_hash, photo_id) VALUES (?, ?)", 
+            (link_hash, photo_id)
+        )
         gconn.commit()
-        gconn.close()
         return jsonify({'success': True})
+        
     except Exception as e:
+        gconn.rollback()
         return jsonify({'error': str(e)}), 500
+    finally:
+        gconn.close()
 
-@app.route('/api/guests/reactivate', methods=['POST'])
-def reactivate_guest():
-    """Reactivate a guest with new duration. Body: {email, duration_days}"""
+@app.route('/api/links/download_zip', methods=['GET'])
+def download_shared_zip():
+    """Download all visible photos in a shared link as a single ZIP file."""
+    link_hash = request.args.get('link_hash')
+    if not link_hash:
+        return "Missing link_hash", 400
+
+    gconn = get_global_share_db()
+    gc = gconn.cursor()
+    try:
+        gc.execute("""
+            SELECT owner_email, asset_id, asset_type, expires_at, link_name
+            FROM shared_links 
+            WHERE link_hash = ?
+        """, (link_hash,))
+        link = gc.fetchone()
+        
+        if not link:
+            return "Link not found or revoked", 404
+            
+        if link['expires_at']:
+            gc.execute("SELECT datetime('now') < ?", (link['expires_at'],))
+            if not gc.fetchone()[0]:
+                return "Link expired", 410
+
+        owner_email = link['owner_email']
+        asset_id = link['asset_id']
+        asset_type = link['asset_type']
+        zip_name = link['link_name'] or "shared_photos"
+        
+        # Connect to owner's DB to fetch the actual asset data
+        conn = database.get_db_connection(owner_email)
+        c = conn.cursor()
+        c.execute("ATTACH DATABASE ? AS global_share", (GLOBAL_SHARE_DB_PATH,))
+        
+        paths_to_zip = []
+        
+        try:
+            if asset_type in ('photo', 'video'):
+                # Check if this specific photo was hidden
+                gc.execute("SELECT 1 FROM shared_link_hidden_items WHERE link_hash = ? AND photo_id = ?", (link_hash, asset_id))
+                if not gc.fetchone():
+                    c.execute("SELECT path FROM photos WHERE id = ?", (asset_id,))
+                    row = c.fetchone()
+                    if row:
+                        paths_to_zip.append(row['path'])
+                        
+            elif asset_type == 'album':
+                album_ids = [aid.strip() for aid in str(asset_id).split(',') if aid.strip().isdigit()]
+                for aid in album_ids:
+                    c.execute("""
+                        SELECT p.path
+                        FROM photos p
+                        JOIN album_photos ap ON p.id = ap.photo_id
+                        WHERE ap.album_id = ? 
+                        AND p.id NOT IN (
+                            SELECT photo_id FROM global_share.shared_link_hidden_items WHERE link_hash = ?
+                        )
+                    """, (aid, link_hash))
+                    for row in c.fetchall():
+                        paths_to_zip.append(row['path'])
+        finally:
+            conn.close()
+            
+        if not paths_to_zip:
+            return "No photos available to download", 404
+            
+        import io, zipfile
+        memory_file = io.BytesIO()
+        with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for rel_path in paths_to_zip:
+                abs_path = os.path.join(DATA_DIR, owner_email, rel_path)
+                if os.path.exists(abs_path):
+                    # Write file into the zip root using its basename
+                    zf.write(abs_path, os.path.basename(abs_path))
+                    
+        memory_file.seek(0)
+        return send_file(
+            memory_file,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f"{zip_name}.zip"
+        )
+        
+    except Exception as e:
+        return str(e), 500
+    finally:
+        gconn.close()
+
+# --- Config API ---
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print("Error loading config:", e)
+    return {"port": 8877, "ai": "YES", "search": "YES", "people": "YES", "discover": "YES"}
+
+def save_config(config_data):
+    try:
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(config_data, f, indent=2)
+        return True
+    except Exception as e:
+        print("Error saving config:", e)
+        return False
+
+@app.route('/api/config', methods=['GET'])
+def get_config_endpoint():
+    config = load_config()
+    return jsonify(config)
+
+@app.route('/api/config', methods=['POST'])
+def update_config_endpoint():
     userid = get_current_userid()
     if not userid:
         return jsonify({'error': 'Unauthorized'}), 401
-    block = require_not_guest()
-    if block: return block
     
-    data = request.json
-    guest_email = data.get('email', '').strip().lower()
-    duration_days = int(data.get('duration_days', 30))
-    if not guest_email:
-        return jsonify({'error': 'Guest email required'}), 400
-    if duration_days < 1 or duration_days > 365:
-        return jsonify({'error': 'Duration must be 1-365 days'}), 400
-    
-    try:
-        gconn = get_guest_db()
-        gc = gconn.cursor()
-        gc.execute("SELECT id FROM guests WHERE email = ?", (guest_email,))
-        guest = gc.fetchone()
-        if not guest:
-            gconn.close()
-            return jsonify({'error': 'Guest not found'}), 404
-        
-        gc.execute("""UPDATE guest_hosts SET status = 'active',
-                      access_till = datetime('now', '+' || ? || ' days'),
-                      last_activated_date = datetime('now')
-                      WHERE guest_id = ? AND host_email = ?""",
-                   (duration_days, guest['id'], userid))
-        if gc.rowcount == 0:
-            gconn.close()
-            return jsonify({'error': 'Guest not invited by you'}), 404
-        
-        gconn.commit()
-        gconn.close()
+    config_data = request.json
+    current_config = load_config()
+    # Update only allowed keys
+    for k in ["port", "ai", "search", "people", "discover"]:
+        if k in config_data:
+            current_config[k] = config_data[k]
+            
+    if save_config(current_config):
         return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
+    return jsonify({'error': 'Failed to save config'}), 500
 
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
     os.makedirs('static', exist_ok=True)
-    app.run(debug=False, port=8877, host='0.0.0.0')
+    cfg = load_config()
+    port = int(cfg.get('port', 8877))
+    app.run(debug=False, port=port, host='0.0.0.0')

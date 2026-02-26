@@ -24,6 +24,8 @@ def reset_database(user_email=None):
     if not users:
         print("No users found.")
         return
+        
+    global_share_db_path = os.path.abspath(os.path.join(BASE_DIR, '../backup/global_share.db'))
     
     print("=" * 60)
     print("COMPLETE DATABASE & DATA RESET")
@@ -33,6 +35,7 @@ def reset_database(user_email=None):
     print("  • Database (photovault.db) — all tables dropped & recreated")
     print("  • ALL thumbnails (photo + face thumbnails)")
     print("  • ALL shared files and symlinks (shared/ directory)")
+    print("  • Global share links (global_share.db)")
     print("\nThis will PRESERVE:")
     print("  • Original photos in device directories")
     print("\nDaemon will need to re-scan and re-process everything.")
@@ -99,6 +102,28 @@ def reset_database(user_email=None):
             print("  [3/3] No shared directory (skipping)")
         
         print(f"  ✅ User {userid} reset complete")
+        
+        # Step 4: Clean up global_share.db
+        if os.path.exists(global_share_db_path):
+            print("  [4/4] Cleaning up global_share.db...")
+            try:
+                if user_email:
+                    # Clean up just for this user
+                    conn = sqlite3.connect(global_share_db_path)
+                    c = conn.cursor()
+                    c.execute("DELETE FROM shared_links WHERE owner_email = ?", (user_email,))
+                    c.execute("DELETE FROM shared_asset_users WHERE owner_email = ?", (user_email,))
+                    conn.commit()
+                    conn.close()
+                    print(f"    ✓ Removed global share links and asset shares for {user_email}")
+                else:
+                    # Nuke it all, it will be recreated on server start
+                    os.remove(global_share_db_path)
+                    print("    ✓ Deleted global_share.db")
+            except Exception as e:
+                print(f"    ❌ Error: {e}")
+        else:
+            print("  [4/4] No global_share.db found (skipping)")
     
     print("\n" + "=" * 60)
     print("✅ RESET COMPLETE!")

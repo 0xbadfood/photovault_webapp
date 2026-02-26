@@ -29,7 +29,7 @@ const uploadManager = {
             // Don't show global overlay if we're on the upload page's native dropzone
             if (e.target.closest && e.target.closest('.upload-dropzone')) return;
 
-            if (state.user && state.user.role !== 'guest') {
+            if (state.user) {
                 overlay.classList.add('active');
             }
         });
@@ -54,7 +54,7 @@ const uploadManager = {
             // Allow specialized handler if dropped straight into the upload page dropzone
             if (e.target.closest && e.target.closest('.upload-dropzone')) return;
 
-            if (!state.user || state.user.role === 'guest') return;
+            if (!state.user) return;
             this.handleDropEvent(e);
         });
     },
@@ -67,10 +67,10 @@ const uploadManager = {
 
     async handleDropEvent(e) {
         this.gatheringFiles = true;
-        if (!this.batchId) this.setNewBatchId();
 
         const entries = [];
         const fallbackFiles = [];
+        let hasDirectory = false;
 
         const items = e.dataTransfer.items;
         if (items) {
@@ -80,6 +80,7 @@ const uploadManager = {
                     // Cache the entry synchronously so it isn't lost if we await
                     const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
                     if (entry) {
+                        if (entry.isDirectory) hasDirectory = true;
                         entries.push(entry);
                     } else {
                         // Fallback
@@ -91,6 +92,20 @@ const uploadManager = {
             const files = e.dataTransfer.files;
             for (let i = 0; i < files.length; i++) {
                 fallbackFiles.push(files[i]);
+            }
+        }
+
+        if (!this.batchId) {
+            if (hasDirectory) {
+                let tag = prompt("Enter a tag/name for this folder upload, or leave blank to use the date:");
+                if (tag && tag.trim()) {
+                    // Sanitize folder name by replacing illegal characters with underscores
+                    this.batchId = tag.trim().replace(/[\/\\?%*:|"<>]/g, '_');
+                } else {
+                    this.setNewBatchId();
+                }
+            } else {
+                this.setNewBatchId();
             }
         }
 
@@ -109,7 +124,28 @@ const uploadManager = {
 
     handleFilesInput(filesList) {
         this.gatheringFiles = true;
-        if (!this.batchId) this.setNewBatchId();
+
+        let hasDirectory = false;
+        for (let i = 0; i < filesList.length; i++) {
+            if (filesList[i].webkitRelativePath && filesList[i].webkitRelativePath.includes('/')) {
+                hasDirectory = true;
+                break;
+            }
+        }
+
+        if (!this.batchId) {
+            if (hasDirectory) {
+                let tag = prompt("Enter a tag/name for this folder upload, or leave blank to use the date:");
+                if (tag && tag.trim()) {
+                    // Sanitize folder name by replacing illegal characters with underscores
+                    this.batchId = tag.trim().replace(/[\/\\?%*:|"<>]/g, '_');
+                } else {
+                    this.setNewBatchId();
+                }
+            } else {
+                this.setNewBatchId();
+            }
+        }
 
         for (let i = 0; i < filesList.length; i++) {
             this.addFileToQueue(filesList[i]);
@@ -195,7 +231,6 @@ const uploadManager = {
             const xhr = new XMLHttpRequest();
             const formData = new FormData();
             formData.append('file', item.file, item.file.name);
-            formData.append('userid', state.user.userid);
             formData.append('upload_batch_id', this.batchId);
 
             xhr.upload.onprogress = (e) => {

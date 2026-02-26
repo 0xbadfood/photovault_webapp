@@ -1,3 +1,9 @@
+// XSS prevention: escape user-controlled strings before HTML insertion
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 let users = [];
 let userToDelete = null;
 
@@ -34,16 +40,16 @@ function renderUsers() {
         const isAdmin = user.is_admin ? '<span style="color: #ffd60a">Admin</span>' : 'User';
 
         tr.innerHTML = `
-            <td>${user.id}</td>
-            <td>${user.email}</td>
+            <td>${escapeHtml(user.id)}</td>
+            <td>${escapeHtml(user.email)}</td>
             <td>${outputStatus}</td>
             <td>${isAdmin}</td>
             <td>
                 ${!user.is_admin ? `
-                    <button class="btn btn-warning" onclick="toggleStatus('${user.email}', '${user.status}')">
+                    <button class="btn btn-warning" onclick="toggleStatus('${escapeHtml(user.email)}', '${escapeHtml(user.status)}')"> 
                         ${user.status === 'active' ? 'Revoke' : 'Activate'}
                     </button>
-                    <button class="btn btn-danger" onclick="showDeleteModal('${user.email}')">Delete</button>
+                    <button class="btn btn-danger" onclick="showDeleteModal('${escapeHtml(user.email)}')">Delete</button>
                 ` : '<span style="color: #888">No actions</span>'}
             </td>
         `;
