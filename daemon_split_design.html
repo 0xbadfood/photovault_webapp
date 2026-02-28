@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhotoVault — Daemon Split Design (daemonv1.py)</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #242836;
+            --border: #2e3346;
+            --accent: #6c8cff;
+            --accent-dim: rgba(108, 140, 255, 0.15);
+            --green: #4ade80;
+            --green-dim: rgba(74, 222, 128, 0.12);
+            --amber: #fbbf24;
+            --amber-dim: rgba(251, 191, 36, 0.12);
+            --red: #f87171;
+            --red-dim: rgba(248, 113, 113, 0.12);
+            --text: #e2e8f0;
+            --text-dim: #94a3b8;
+            --text-muted: #64748b;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            padding: 0;
+        }
+
+        /* Hero */
+        .hero {
+            background: linear-gradient(135deg, #1a1040 0%, #0f1117 50%, #0a1628 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 60px 40px 50px;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #6c8cff, #a78bfa, #6c8cff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 12px;
+        }
+
+        .hero .subtitle {
+            font-size: 1.1rem;
+            color: var(--text-dim);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .hero .badge {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            background: var(--accent-dim);
+            color: var(--accent);
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        /* Main container */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px 80px;
+        }
+
+        /* Sections */
+        section {
+            margin-bottom: 48px;
+        }
+
+        section h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        section h2 .icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+        }
+
+        section h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin: 20px 0 12px;
+        }
+
+        p,
+        li {
+            color: var(--text-dim);
+            font-size: 0.95rem;
+        }
+
+        p {
+            margin-bottom: 14px;
+        }
+
+        ul {
+            padding-left: 20px;
+            margin-bottom: 14px;
+        }
+
+        li {
+            margin-bottom: 6px;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+
+        .card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        /* Thread cards */
+        .thread-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        @media (max-width: 700px) {
+            .thread-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .thread-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .thread-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .thread-card.fast::before {
+            background: var(--green);
+        }
+
+        .thread-card.slow::before {
+            background: var(--amber);
+        }
+
+        .thread-card .thread-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .thread-card.fast .thread-label {
+            color: var(--green);
+        }
+
+        .thread-card.slow .thread-label {
+            color: var(--amber);
+        }
+
+        .thread-card h4 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .thread-card .tasks {
+            list-style: none;
+            padding: 0;
+        }
+
+        .thread-card .tasks li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+
+        .thread-card .tasks li:last-child {
+            border-bottom: none;
+        }
+
+        .thread-card .tasks .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .thread-card.fast .tasks .dot {
+            background: var(--green);
+        }
+
+        .thread-card.slow .tasks .dot {
+            background: var(--amber);
+        }
+
+        /* Flow diagram */
+        .flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0;
+            flex-wrap: wrap;
+            padding: 30px 0;
+        }
+
+        .flow-step {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px 20px;
+            text-align: center;
+            min-width: 140px;
+        }
+
+        .flow-step .label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .flow-step .value {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-top: 4px;
+        }
+
+        .flow-arrow {
+            font-size: 1.5rem;
+            color: var(--text-muted);
+            padding: 0 8px;
+        }
+
+        .flow-step.green {
+            border-color: rgba(74, 222, 128, 0.3);
+        }
+
+        .flow-step.blue {
+            border-color: rgba(108, 140, 255, 0.3);
+        }
+
+        .flow-step.amber {
+            border-color: rgba(251, 191, 36, 0.3);
+        }
+
+        /* Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.9rem;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: var(--surface-2);
+        }
+
+        td {
+            color: var(--text-dim);
+        }
+
+        tr:hover td {
+            background: var(--surface);
+        }
+
+        /* Code */
+        pre {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            overflow-x: auto;
+            font-family: var(--mono);
+            font-size: 0.85rem;
+            line-height: 1.6;
+            color: var(--text-dim);
+            margin: 16px 0;
+        }
+
+        code {
+            font-family: var(--mono);
+            font-size: 0.85rem;
+            background: var(--surface-2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: var(--accent);
+        }
+
+        /* Alert boxes */
+        .alert {
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-size: 0.9rem;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .alert.info {
+            background: var(--accent-dim);
+            border-left: 3px solid var(--accent);
+            color: #93b4ff;
+        }
+
+        .alert.warn {
+            background: var(--amber-dim);
+            border-left: 3px solid var(--amber);
+            color: #fcd473;
+        }
+
+        .alert.success {
+            background: var(--green-dim);
+            border-left: 3px solid var(--green);
+            color: #86efac;
+        }
+
+        .alert .alert-icon {
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        /* Sync diagram */
+        .sync-diagram {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 20px 0;
+        }
+
+        .sync-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sync-row:last-child {
+            border-bottom: none;
+        }
+
+        .sync-label {
+            width: 120px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+
+        .sync-bar {
+            flex: 1;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+        }
+
+        .sync-bar.scanner {
+            background: linear-gradient(90deg, var(--green-dim), transparent 70%);
+            border: 1px solid rgba(74, 222, 128, 0.2);
+            color: var(--green);
+            width: 40%;
+        }
+
+        .sync-bar.ai {
+            background: linear-gradient(90deg, transparent 30%, var(--amber-dim));
+            border: 1px solid rgba(251, 191, 36, 0.2);
+            color: var(--amber);
+            width: 80%;
+            margin-left: 30%;
+        }
+
+        .sync-bar.barrier {
+            background: var(--accent-dim);
+            border: 1px dashed var(--accent);
+            color: var(--accent);
+            width: 10px;
+            margin-left: 38%;
+            justify-content: center;
+            min-width: fit-content;
+            padding: 0 8px;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+
+    <!-- Hero -->
+    <div class="hero">
+        <h1>Daemon Architecture: Two-Thread Split</h1>
+        <p class="subtitle">
+            Splitting the monolithic photo processing pipeline into a fast Scanner thread
+            and a slow AI Worker thread for dramatically improved user experience.
+        </p>
+        <span class="badge">daemonv1.py — Design Document</span>
+    </div>
+
+    <div class="container">
+
+        <!-- Problem Statement -->
+        <section>
+            <h2><span class="icon" style="background:var(--red-dim); color:var(--red);">⚠</span> Problem</h2>
+            <p>
+                The current <code>daemon.py</code> processes each photo <strong>sequentially</strong> through
+                the entire pipeline: thumbnail → EXIF → face recognition → description generation.
+                Since face recognition and AI description are <strong>very slow</strong> (seconds per file),
+                newly uploaded photos cannot even display thumbnails until the AI finishes processing
+                earlier photos in the queue.
+            </p>
+            <div class="alert warn">
+                <span class="alert-icon">⏱</span>
+                <span>When multiple users upload photos simultaneously, wait times can reach <strong>minutes</strong>
+                    before any thumbnails appear, severely degrading the user experience.</span>
+            </div>
+        </section>
+
+        <!-- Solution Overview -->
+        <section>
+            <h2><span class="icon" style="background:var(--green-dim); color:var(--green);">✦</span> Solution</h2>
+            <p>
+                Split the processing into <strong>two independent threads</strong>, each with its own
+                responsibility and run frequency:
+            </p>
+
+            <div class="thread-grid">
+                <div class="thread-card fast">
+                    <div class="thread-label">Thread 1 — Scanner</div>
+                    <h4>Fast Path</h4>
+                    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                        Runs every <strong>15 seconds</strong>. Ensures thumbnails appear immediately.
+                    </p>
+                    <ul class="tasks">
+                        <li><span class="dot"></span> Discover new files</li>
+                        <li><span class="dot"></span> Insert into database</li>
+                        <li><span class="dot"></span> Generate thumbnails</li>
+                        <li><span class="dot"></span> Extract EXIF metadata</li>
+                        <li><span class="dot"></span> Determine image type</li>
+                    </ul>
+                </div>
+                <div class="thread-card slow">
+                    <div class="thread-label">Thread 2 — AI Worker</div>
+                    <h4>Slow Path</h4>
+                    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:12px;">
+                        Runs every <strong>30 seconds</strong>. Heavy AI processing at its own pace.
+                    </p>
+                    <ul class="tasks">
+                        <li><span class="dot"></span> Face recognition</li>
+                        <li><span class="dot"></span> Face crop &amp; save</li>
+                        <li><span class="dot"></span> People matching</li>
+                        <li><span class="dot"></span> Description generation</li>
+                        <li><span class="dot"></span> (MobileNetV2 inference)</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- Data Flow -->
+        <section>
+            <h2><span class="icon" style="background:var(--accent-dim); color:var(--accent);">→</span> Data Flow</h2>
+            <div class="flow">
+                <div class="flow-step green">
+                    <div class="label">Input</div>
+                    <div class="value">New Photo</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step green">
+                    <div class="label">Thread 1</div>
+                    <div class="value">Thumbnail + EXIF</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step blue">
+                    <div class="label">Barrier</div>
+                    <div class="value">SQLite Flags</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step amber">
+                    <div class="label">Thread 2</div>
+                    <div class="value">Faces + Description</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Synchronization -->
+        <section>
+            <h2><span class="icon" style="background:var(--accent-dim); color:var(--accent);">🔒</span> Synchronization
+                Strategy</h2>
+
+            <div class="alert info">
+                <span class="alert-icon">ℹ</span>
+                <span><strong>Key Invariant:</strong> Thread 2 must <em>never</em> process a file
+                    until Thread 1 has finished generating its thumbnail and extracting EXIF data.</span>
+            </div>
+
+            <h3>Database Flags as Barrier</h3>
+            <p>
+                The <code>photos</code> table already has boolean flags:
+                <code>processed_for_thumbnails</code>, <code>processed_for_exif</code>,
+                <code>processed_for_faces</code>, and the <code>description</code> column.
+                These flags serve as the synchronization mechanism:
+            </p>
+
+            <div class="card">
+                <h4>Thread 1 (Scanner) writes:</h4>
+                <pre>UPDATE photos SET processed_for_thumbnails = 1 WHERE id = ?
+UPDATE photos SET processed_for_exif = 1, type = ?, date_taken = ? WHERE id = ?</pre>
+
+                <h4 style="margin-top:16px;">Thread 2 (AI Worker) queries:</h4>
+                <pre>SELECT id, path, type FROM photos
+WHERE processed_for_thumbnails = 1
+  AND processed_for_exif = 1
+  AND (processed_for_faces = 0 OR description IS NULL)
+  AND type != 'screenshot'     -- skip screenshots
+  AND type != 'video'          -- skip videos for face/desc</pre>
+            </div>
+
+            <h3>Timeline Visualization</h3>
+            <div class="sync-diagram">
+                <div class="sync-row">
+                    <span class="sync-label" style="color:var(--green);">Scanner</span>
+                    <div class="sync-bar scanner">Thumb + EXIF ✓</div>
+                </div>
+                <div class="sync-row">
+                    <span class="sync-label" style="color:var(--accent);">Barrier</span>
+                    <div class="sync-bar barrier">DB flags checked</div>
+                </div>
+                <div class="sync-row">
+                    <span class="sync-label" style="color:var(--amber);">AI Worker</span>
+                    <div class="sync-bar ai">Faces + Description ...</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Thread Safety -->
+        <section>
+            <h2><span class="icon" style="background:var(--amber-dim); color:var(--amber);">⚡</span> Thread Safety</h2>
+
+            <table>
+                <tr>
+                    <th>Concern</th>
+                    <th>Solution</th>
+                </tr>
+                <tr>
+                    <td>SQLite concurrent writes</td>
+                    <td>WAL mode enabled (<code>PRAGMA journal_mode=WAL</code>)</td>
+                </tr>
+                <tr>
+                    <td>Shared connection objects</td>
+                    <td>Each thread creates its own connection per scan cycle</td>
+                </tr>
+                <tr>
+                    <td>AI thread reads half-written row</td>
+                    <td>Impossible — Thread 2 only reads rows where flags = 1</td>
+                </tr>
+                <tr>
+                    <td>Race on same file</td>
+                    <td>Thread 2 queries only fully processed rows</td>
+                </tr>
+            </table>
+        </section>
+
+        <!-- Race Condition Handling -->
+        <section>
+            <h2><span class="icon" style="background:var(--red-dim); color:var(--red);">🏁</span> Race Condition
+                Handling</h2>
+
+            <table>
+                <tr>
+                    <th>Scenario</th>
+                    <th>What Happens</th>
+                </tr>
+                <tr>
+                    <td>AI thread reaches file before thumbnail exists</td>
+                    <td><span style="color:var(--green);">✓ Won't happen</span> — DB query filters on
+                        <code>processed_for_thumbnails = 1</code></td>
+                </tr>
+                <tr>
+                    <td>Both threads write to DB concurrently</td>
+                    <td><span style="color:var(--green);">✓ Safe</span> — Separate connections + SQLite WAL mode</td>
+                </tr>
+                <tr>
+                    <td>AI thread crashes mid-processing</td>
+                    <td><span style="color:var(--green);">✓ Resilient</span> — Flags remain 0, file retried next cycle
+                    </td>
+                </tr>
+                <tr>
+                    <td>Scanner thread crashes</td>
+                    <td><span style="color:var(--green);">✓ Resilient</span> — Thumbnail flag stays 0, AI ignores it
+                    </td>
+                </tr>
+                <tr>
+                    <td>New files arrive during AI processing</td>
+                    <td><span style="color:var(--green);">✓ No delay</span> — Scanner picks them up independently</td>
+                </tr>
+            </table>
+        </section>
+
+        <!-- Code Structure -->
+        <section>
+            <h2><span class="icon" style="background:var(--accent-dim); color:var(--accent);">📄</span> Code Structure —
+                <code>daemonv1.py</code></h2>
+
+            <pre>
+<span style="color:#64748b;"># Imports &amp; constants (same as daemon.py)</span>
+
+<span style="color:var(--green);">def scan_and_thumbnail():</span>
+    <span style="color:#64748b;">"""Thread 1 — Fast path.
+    For each user directory:
+      1. Walk file tree, find new media files
+      2. INSERT into photos table
+      3. Generate thumbnail (image or video)
+      4. Extract EXIF, determine type
+      5. Handle video metadata
+    """</span>
+
+<span style="color:var(--amber);">def ai_process():</span>
+    <span style="color:#64748b;">"""Thread 2 — Slow path.
+    For each user:
+      1. Query photos WHERE thumbnail=1 AND exif=1
+         AND (faces=0 OR description IS NULL)
+      2. Skip screenshots &amp; videos
+      3. Run face recognition
+      4. Run description generation (MobileNetV2)
+    """</span>
+
+<span style="color:var(--text-dim);">def scanner_loop():</span>
+    <span style="color:#64748b;">"""Wraps scan_and_thumbnail in a while-True loop (15s sleep)"""</span>
+
+<span style="color:var(--text-dim);">def ai_worker_loop():</span>
+    <span style="color:#64748b;">"""Wraps ai_process in a while-True loop (30s sleep)"""</span>
+
+<span style="color:var(--accent);">if __name__ == '__main__':</span>
+    scanner_thread = Thread(target=scanner_loop, daemon=True)
+    ai_thread = Thread(target=ai_worker_loop, daemon=True)
+    scanner_thread.start()
+    ai_thread.start()
+    <span style="color:#64748b;"># Keep main alive</span>
+    while True: time.sleep(60)
+        </pre>
+
+            <div class="alert success">
+                <span class="alert-icon">✓</span>
+                <span>All utility functions (<code>process_exif</code>, <code>process_faces</code>,
+                    <code>process_description</code>, <code>save_face_crop</code>, etc.) are
+                    <strong>copied unchanged</strong> from <code>daemon.py</code>.</span>
+            </div>
+        </section>
+
+    </div>
+
+    <footer>
+        PhotoVault — Daemon Split Design Document &bull; February 2026
+    </footer>
+
+</body>
+
+</html>

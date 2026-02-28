@@ -1,0 +1,2 @@
+sudo systemctl stop photovault-webapp
+sudo systemctl stop photovault-daemon

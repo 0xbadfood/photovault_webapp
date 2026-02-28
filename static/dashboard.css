@@ -30,7 +30,7 @@
 }
 
 .dash-card {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--overlay-light-5);
     border: 1px solid var(--border-color);
     border-radius: 16px;
     padding: 24px;
@@ -88,7 +88,7 @@
 
 .progress-bar-container {
     height: 8px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--overlay-light-10);
     border-radius: 4px;
     overflow: hidden;
 }
@@ -114,7 +114,7 @@
 }
 
 .stat-item {
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--overlay-light-3);
     border-radius: 12px;
     padding: 16px;
     text-align: center;
@@ -151,7 +151,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--overlay-light-3);
     border-radius: 8px;
 }
 
@@ -191,7 +191,7 @@
 .mini-bar-container {
     flex: 1;
     height: 6px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--overlay-light-10);
     border-radius: 3px;
     overflow: hidden;
 }
@@ -207,7 +207,7 @@
     font-size: 12px;
     color: var(--text-secondary);
     line-height: 1.5;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: 1px solid var(--overlay-light-10);
     padding-top: 10px;
 }
 

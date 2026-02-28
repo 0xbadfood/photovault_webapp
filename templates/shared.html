@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shared Asset - PhotoVault</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <link rel="stylesheet" href="/static/style.css?v=16">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --main-bg: #0d0d0d;
+            --text-primary: #ffffff;
+            --text-secondary: #8e8e93;
+            --accent-color: #0a84ff;
+            --overlay-light-10: rgba(255, 255, 255, 0.1);
+            --overlay-light-40: rgba(255, 255, 255, 0.4);
+            --glass-bg: rgba(20, 20, 22, 0.7);
+        }
+
+        body {
+            background-color: var(--main-bg);
+            background-image: radial-gradient(circle at 50% 0%, rgba(10, 132, 255, 0.15), rgba(0, 0, 0, 0) 60%);
+            color: var(--text-primary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow-y: auto;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+
+        .top-bar {
+            width: 100%;
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--overlay-light-10);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .top-bar-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            padding: 6px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+        }
+
+        .shared-container {
+            flex: 1;
+            width: 100%;
+            max-width: 1400px;
+            padding: 32px 24px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Password Prompt */
+        .password-prompt {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            width: 100%;
+        }
+
+        .password-prompt .login-box {
+            position: relative;
+            transform: none;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--overlay-light-10);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .password-prompt h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            margin-top: 0;
+        }
+
+        .error-msg {
+            color: #ff453a;
+            margin-bottom: 16px;
+            font-size: 14px;
+            display: none;
+            background: rgba(255, 69, 58, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 14px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--overlay-light-10);
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            box-sizing: border-box;
+            margin-bottom: 20px;
+        }
+
+        .input-group input:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.3);
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            border-radius: 12px;
+            border: none;
+            background: var(--accent-color);
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: filter 0.2s, transform 0.1s;
+        }
+
+        .login-btn:hover {
+            filter: brightness(1.1);
+        }
+
+        .login-btn:active {
+            transform: scale(0.98);
+        }
+
+        /* Content Area */
+        .single-item-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        .single-media {
+            max-width: 100%;
+            max-height: calc(100vh - 160px);
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            object-fit: contain;
+        }
+
+        .album-header {
+            margin-bottom: 32px;
+            text-align: center;
+        }
+
+        .album-title {
+            font-size: 40px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            letter-spacing: -1px;
+            background: linear-gradient(135deg, #fff, #aaa);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .album-desc {
+            color: var(--text-secondary);
+            font-size: 16px;
+            font-weight: 400;
+        }
+
+        #shared-content {
+            display: none;
+            width: 100%;
+            height: 100%;
+            flex-direction: column;
+        }
+
+        #loading-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            width: 100%;
+            font-size: 32px;
+            color: var(--accent-color);
+            gap: 16px;
+        }
+
+        .lightbox {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            z-index: 1000;
+            display: none;
+            flex-direction: column;
+        }
+
+        .lightbox.active {
+            display: flex;
+        }
+
+        .lightbox-close-btn {
+            position: absolute;
+            top: 24px;
+            left: 24px;
+            padding: 10px 20px;
+            border-radius: 24px;
+            background: rgba(30, 30, 30, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            z-index: 9999;
+            transition: all 0.2s;
+            backdrop-filter: blur(10px);
+        }
+
+        .lightbox-close-btn:hover {
+            background: rgba(60, 60, 60, 0.9);
+            transform: scale(1.02);
+            border-color: rgba(255, 255, 255, 0.4);
+        }
+
+        .lightbox-close-btn:active {
+            transform: scale(0.98);
+        }
+
+        .lightbox-content {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            width: 100%;
+            height: 100%;
+            box-sizing: border-box;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        #lightbox-media-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #lightbox-media-container img,
+        #lightbox-media-container video {
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 8px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+            object-fit: contain;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="loading-state">
+        <i class="fas fa-circle-notch fa-spin"></i>
+    </div>
+
+
+
+    <!-- Password Prompt -->
+    <div id="password-prompt" class="password-prompt" style="display: none;">
+        <div class="login-box">
+            <h1><i class="fas fa-lock" style="margin-right: 8px;"></i> Protected Link</h1>
+            <p style="color: var(--text-secondary); margin-bottom: 20px;">This shared link requires a password.</p>
+            <div id="password-error" class="error-msg" style="display: none;">Incorrect password</div>
+            <div class="input-group">
+                <input type="password" id="link-password" placeholder="Enter password"
+                    onkeypress="if(event.key === 'Enter') submitLinkPassword(event)">
+            </div>
+            <button class="login-btn" onclick="submitLinkPassword(event)">Unlock</button>
+        </div>
+    </div>
+
+    <!-- Shared Content -->
+    <div id="shared-content">
+        <div class="top-bar">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <img src="/static/logo.png" alt="Logo"
+                    style="width: 28px; height: 28px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                <div style="font-size: 18px; font-weight: 700; letter-spacing: -0.5px;">
+                    <span style="color: #fff;">Photo</span><span style="color: var(--accent-color);">Vault</span>
+                </div>
+            </div>
+            <div style="flex: 1; text-align: center;" class="top-bar-title" id="top-bar-text">Shared with you</div>
+            <div style="display: flex; align-items: center;">
+                <a id="download-zip-btn" href="#" class="top-bar-btn" title="Download All as ZIP"
+                    style="display: flex; align-items: center; gap: 8px; text-decoration: none;">
+                    <i class="fa-solid fa-download"></i> <span style="font-size: 14px; font-weight: 500;">Download
+                        ZIP</span>
+                </a>
+            </div>
+        </div>
+
+        <div class="shared-container" id="content-container">
+            <!-- Injected by JS -->
+        </div>
+    </div>
+
+    <script src="/static/shared.js?v=3"></script>
+</body>
+
+</html>

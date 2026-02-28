@@ -89,19 +89,6 @@ def init_db(userid):
         )
     ''')
     
-    # Shared photos tracking table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS shared_photos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            original_photo_id INTEGER NOT NULL,
-            owner_email TEXT NOT NULL,
-            recipient_email TEXT NOT NULL,
-            recipient_photo_id INTEGER,
-            shared_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(original_photo_id, recipient_email)
-        )
-    ''')
-    
     conn.commit()
     conn.close()
 

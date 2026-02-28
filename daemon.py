@@ -120,6 +120,18 @@ def generate_video_thumbnail(video_path, thumb_path):
 def scan_and_process():
     print("Starting scan...")
     
+    ai_enabled = True
+    config_path = os.path.join(BASE_DIR, 'config.json')
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+                if cfg.get('ai', 'YES') == 'NO':
+                    ai_enabled = False
+        except:
+            pass
+            
     # 1. Walk through all user directories
     if os.path.exists(DATA_DIR):
         for userid in os.listdir(DATA_DIR):
@@ -148,7 +160,7 @@ def scan_and_process():
                         
                         full_path = os.path.join(root, filename)
                         
-                        # Skip symlinks (shared files) — they are managed by the share system
+                        # Skip symlinks to avoid duplicates or recursive loops
                         if os.path.islink(full_path):
                             continue
                         
@@ -247,29 +259,16 @@ def scan_and_process():
                         if current_type == 'screenshot':
                             if not processed_faces:
                                 c.execute("UPDATE photos SET processed_for_faces = 1 WHERE id = ?", (photo_id,))
-                            if not processed_faces: # Just reusing the logic block, essentially we want to ensure it is marked processed
-                                pass
-                        elif AI_AVAILABLE and not processed_faces:
+                        elif AI_AVAILABLE and ai_enabled and not processed_faces:
                             process_faces(conn, photo_id, full_path, userid)
                         
                         # Task 4: Description Generation
                         # Skip for screenshots
                         if current_type == 'screenshot':
                              if not has_description:
-                                  # We don't have a 'processed_for_description' flag, we just check if description is NULL/Empty.
-                                  # To avoid re-checking, we should probably just leave it empty or set a placeholder?
-                                  # But the check is `if not has_description`.
-                                  # If we do nothing, it will keep checking.
-                                  # We should probably set a placeholder like "Screenshot" or just ignore?
-                                  # Daemon loops forever. We need a way to say "don't try again".
-                                  # The current schema doesn't have `processed_for_description`. It relies on description field.
-                                  # Let's set description to 'Screenshot' or empty string? 
-                                  # If empty string, `has_description` (row['description']) might be falsy?
-                                  # row['description'] is False if None or Empty string.
-                                  # Let's set it to "Screenshot".
                                   c.execute("UPDATE photos SET description = 'Screenshot' WHERE id = ?", (photo_id,))
                                   conn.commit()
-                        elif not has_description:
+                        elif ai_enabled and not has_description:
                              process_description(conn, photo_id, full_path)
 
             conn.close()

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhotoVault API Documentation</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #e1e4e8;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 40px;
+            border-bottom: 1px solid #e1e4e8;
+            padding-bottom: 5px;
+        }
+        .endpoint-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+            padding: 20px;
+            border-left: 5px solid #3498db;
+        }
+        .endpoint-card.get { border-left-color: #61affe; }
+        .endpoint-card.post { border-left-color: #49cc90; }
+        .endpoint-card.delete { border-left-color: #f93e3e; }
+        .endpoint-card.put { border-left-color: #fca130; }
+
+        .method {
+            font-weight: bold;
+            text-transform: uppercase;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: white;
+            font-size: 0.85em;
+            margin-right: 10px;
+            display: inline-block;
+            width: 60px;
+            text-align: center;
+        }
+        .method.get { background-color: #61affe; }
+        .method.post { background-color: #49cc90; }
+        .method.delete { background-color: #f93e3e; }
+        .method.put { background-color: #fca130; }
+
+        .path {
+            font-family: monospace;
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #555;
+        }
+        .description {
+            margin: 10px 0;
+            color: #666;
+        }
+        .params-table, .response-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 0.95em;
+        }
+        .params-table th, .params-table td,
+        .response-table th, .response-table td {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .params-table th { background-color: #f8f9fa; width: 30%; }
+        code {
+            background-color: #f1f3f5;
+            padding: 2px 4px;
+            border-radius: 4px;
+            font-family: monospace;
+            color: #d63384;
+        }
+        .section-nav {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .section-nav ul {
+            list-style: none;
+            padding: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .section-nav a {
+            text-decoration: none;
+            color: #3498db;
+            font-weight: 500;
+        }
+        .section-nav a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>PhotoVault API Documentation</h1>
+    
+    <div class="section-nav">
+        <strong>Jump to:</strong>
+        <ul>
+            <li><a href="#auth">Authentication</a></li>
+            <li><a href="#files">Files & Resources</a></li>
+            <li><a href="#photos">Photos & Metadata</a></li>
+            <li><a href="#dashboard">Dashboard</a></li>
+            <li><a href="#people">People</a></li>
+            <li><a href="#timeline">Timeline</a></li>
+            <li><a href="#albums">Albums</a></li>
+            <li><a href="#discover">Discover</a></li>
+            <li><a href="#sharing">Sharing</a></li>
+        </ul>
+    </div>
+
+    <h2 id="auth">Authentication</h2>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/login</span>
+        <div class="description">Authenticate a user with email (userid) and password.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code> (string), <code>password</code> (string)</td></tr>
+            <tr><th>Response</th><td>Auth success status, user details, and cookie.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/auth/check</span>
+        <div class="description">Check if the current user is authenticated via cookies.</div>
+        <table class="params-table">
+            <tr><th>Response</th><td><code>{ authenticated: boolean, userid: string }</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/logout</span>
+        <div class="description">Log out the current user and clear cookies.</div>
+    </div>
+
+    <h2 id="files">Files & Resources</h2>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/scan</span>
+        <div class="description">Scan files for a user (returns directory tree structure).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code> (string)</td></tr>
+            <tr><th>Response</th><td>JSON tree of devices and files.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/resource/thumbnail/&lt;userid&gt;/&lt;filename&gt;</span>
+        <div class="description">Serve a generated thumbnail image.</div>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/resource/image/&lt;userid&gt;/&lt;device&gt;/&lt;filename&gt;</span>
+        <div class="description">Serve a full-resolution image or video file (supports partial content).</div>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/files/list</span>
+        <div class="description">List files in a specific directory.</div>
+        <table class="params-table">
+            <tr><th>Query Parameters</th><td><code>userid</code> (string), <code>path</code> (string, relative)</td></tr>
+            <tr><th>Response</th><td>List of file objects with name, type, size, modified time.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/files/rename</span>
+        <div class="description">Rename a file or directory.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code>, <code>path</code>, <code>new_name</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/files/batch-delete</span>
+        <div class="description">Delete multiple files or directories at once.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code>, <code>paths</code> (array of strings)</td></tr>
+        </table>
+    </div>
+    
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/files/delete</span>
+        <div class="description">Delete a single file or directory.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code>, <code>path</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/files/download</span>
+        <div class="description">Download multiple files as a ZIP archive.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code>, <code>paths</code> (array of strings)</td></tr>
+            <tr><th>Response</th><td>Binary ZIP file stream.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="photos">Photos & Metadata</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/photo/metadata</span>
+        <div class="description">Get detailed metadata for a specific photo.</div>
+        <table class="params-table">
+            <tr><th>Query Parameters</th><td><code>userid</code>, <code>id</code> (photo_id) OR <code>path</code> (file path)</td></tr>
+            <tr><th>Response</th><td>Photo metadata including date, location, description, dimensions.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/search</span>
+        <div class="description">Search photos by people or description/keywords.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>person_ids</code> (array), <code>description</code> (string)</td></tr>
+            <tr><th>Response</th><td>List of matching photos.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="dashboard">Dashboard</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/dashboard/stats</span>
+        <div class="description">Get system and application statistics for the dashboard.</div>
+        <table class="params-table">
+            <tr><th>Query Parameters</th><td><code>userid</code></td></tr>
+            <tr><th>Response</th><td>Stats on media counts, storage usage, AI processing, and system health.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="people">People</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/people</span>
+        <div class="description">List all identified people with their thumbnails.</div>
+        <table class="params-table">
+            <tr><th>Response</th><td>List of people with ID, name, thumbnail path, and photo count.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/people/update</span>
+        <div class="description">Update a person's name (and tag photos with the new name).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>id</code> (person_id), <code>name</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/people/delete</span>
+        <div class="description">Delete a person and their associations (does not delete photos).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>id</code> (person_id)</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/people/&lt;person_id&gt;/photos</span>
+        <div class="description">Get all photos containing a specific person.</div>
+        <table class="params-table">
+            <tr><th>Response</th><td>Person details and list of photos.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="timeline">Timeline</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/timeline</span>
+        <div class="description">Get photos grouped by date for the main timeline view.</div>
+        <table class="params-table">
+            <tr><th>Query Parameters</th><td><code>userid</code>, <code>year</code>, <code>month</code>, <code>type</code> (photo|video|screenshot), <code>search</code></td></tr>
+            <tr><th>Response</th><td>Groups of photos organized by date.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="albums">Albums</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/albums</span>
+        <div class="description">List all albums.</div>
+        <table class="params-table">
+            <tr><th>Response</th><td>List of albums with cover photo, names, and stats.</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/albums/create</span>
+        <div class="description">Create a new manual album.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>name</code>, <code>description</code>, <code>album_type</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card delete">
+        <span class="method delete">DELETE</span>
+        <span class="path">/api/albums/&lt;album_id&gt;</span>
+        <div class="description">Delete an album (and cascade delete shared copies).</div>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/albums/&lt;album_id&gt;/photos</span>
+        <div class="description">Get all photos in a specific album.</div>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/albums/&lt;album_id&gt;/add-photos</span>
+        <div class="description">Add photos to an album.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>photo_ids</code> (array of integers)</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/albums/&lt;album_id&gt;/remove-photos</span>
+        <div class="description">Remove photos from an album.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>photo_ids</code> (array of integers)</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/albums/auto-generate</span>
+        <div class="description">Auto-generate albums based on date clustering (events).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>userid</code></td></tr>
+        </table>
+    </div>
+
+    <h2 id="discover">Discover</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/discover/memories</span>
+        <div class="description">Get curated memories (e.g., "A Year Ago Today", "Recent Highlights").</div>
+        <table class="params-table">
+            <tr><th>Query Parameters</th><td><code>userid</code></td></tr>
+            <tr><th>Response</th><td>List of memory objects containing photos.</td></tr>
+        </table>
+    </div>
+
+    <h2 id="sharing">Sharing</h2>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/users/list</span>
+        <div class="description">List other users available for sharing.</div>
+    </div>
+
+    <div class="endpoint-card get">
+        <span class="method get">GET</span>
+        <span class="path">/api/received-photos</span>
+        <div class="description">Get photos shared with the current user, grouped by sender.</div>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/share</span>
+        <div class="description">Share a photo with one or more users.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>photo_id</code>, <code>recipients</code> (array of emails)</td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/unshare</span>
+        <div class="description">Unshare a photo (action by owner).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>photo_id</code>, <code>recipient_email</code></td></tr>
+        </table>
+    </div>
+    
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/unshare/received</span>
+        <div class="description">Remove a photo shared with the user (action by recipient).</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>photo_id</code></td></tr>
+        </table>
+    </div>
+
+    <div class="endpoint-card post">
+        <span class="method post">POST</span>
+        <span class="path">/api/albums/&lt;album_id&gt;/share/user</span>
+        <div class="description">Share an entire album with another user.</div>
+        <table class="params-table">
+            <tr><th>Body Parameters</th><td><code>email</code> (recipient email)</td></tr>
+        </table>
+    </div>
+
+    <footer>
+        <p>&copy; 2026 PhotoVault API Documentation. Generated automatically.</p>
+    </footer>
+
+</body>
+</html>
